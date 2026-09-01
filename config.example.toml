@@ -35,6 +35,15 @@ position_delta_min_usd = 0.0     # 持仓名义变化达到该金额才告警
 ignore_ws_snapshots = true       # 忽略 WebSocket 连接时下发的历史快照
 alert_funding = false            # 是否告警资金费事件；默认关闭
 
+[hunter]
+min_account_value = 500000      # 账户净值下限（USD），用于筛选体量较大的账户
+min_volume = 10000000           # 全时段成交量下限（USD）
+min_pnl = 0                     # 全时段盈亏下限（USD）
+min_roi = 0                     # 全时段收益率下限
+min_win_rate = 0.5              # 加权胜率下限（0-1，按盈亏金额加权）
+candidates = 40                 # 粗筛后精算胜率的候选账户数
+top_n = 10                      # 最终收集的账户数
+
 [orders]
 base_gap_pct = 0.2               # 挂单密集区间的最低合并阈值（百分比）
 vol_multiplier = 1.5             # 山寨自动放宽：阈值 = 币种典型小时波动 × 该倍数

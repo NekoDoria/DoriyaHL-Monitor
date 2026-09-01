@@ -5,6 +5,14 @@ import os
 import sqlite3
 import threading
 
+
+def _as_float(value, default=0.0):
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS events (
     id      TEXT PRIMARY KEY,
@@ -54,6 +62,20 @@ CREATE TABLE IF NOT EXISTS chat_settings (
     value      TEXT NOT NULL,
     updated_ms INTEGER NOT NULL,
     PRIMARY KEY (chat_id, key)
+);
+CREATE TABLE IF NOT EXISTS collected_accounts (
+    address            TEXT PRIMARY KEY,
+    alias              TEXT NOT NULL DEFAULT '',
+    account_value      TEXT NOT NULL,
+    volume             TEXT NOT NULL,
+    pnl                TEXT NOT NULL,
+    roi                TEXT NOT NULL,
+    win_rate           TEXT NOT NULL,
+    weighted_win_rate  TEXT NOT NULL,
+    profit_factor      TEXT NOT NULL,
+    score              TEXT NOT NULL,
+    sample_size        INTEGER NOT NULL,
+    scanned_at         INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_events_ts ON events(ts);
 CREATE INDEX IF NOT EXISTS idx_snapshots_addr_ts ON snapshots(address, ts);
@@ -195,6 +217,64 @@ class EventStore:
                     )
                     for coin, balance in balances.items()
                 ],
+            )
+            self.conn.commit()
+
+    def upsert_collected_account(self, account):
+        with self._lock:
+            self.conn.execute(
+                "INSERT OR REPLACE INTO collected_accounts("
+                "address, alias, account_value, volume, pnl, roi, win_rate,"
+                " weighted_win_rate, profit_factor, score, sample_size, scanned_at)"
+                " VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+                (
+                    str(account.get("address", "")).lower(),
+                    str(account.get("alias", "") or ""),
+                    str(account.get("account_value", 0)),
+                    str(account.get("volume", 0)),
+                    str(account.get("pnl", 0)),
+                    str(account.get("roi", 0)),
+                    str(account.get("win_rate", 0)),
+                    str(account.get("weighted_win_rate", 0)),
+                    str(account.get("profit_factor", 0)),
+                    str(account.get("score", 0)),
+                    int(account.get("sample_size", 0)),
+                    int(account.get("scanned_at") or 0),
+                ),
+            )
+            self.conn.commit()
+
+    def get_collected_accounts(self):
+        with self._lock:
+            rows = self.conn.execute(
+                "SELECT address, alias, account_value, volume, pnl, roi, win_rate,"
+                " weighted_win_rate, profit_factor, score, sample_size, scanned_at"
+                " FROM collected_accounts ORDER BY score DESC"
+            ).fetchall()
+        return [
+            {
+                "address": address,
+                "alias": alias,
+                "account_value": _as_float(account_value, 0),
+                "volume": _as_float(volume, 0),
+                "pnl": _as_float(pnl, 0),
+                "roi": _as_float(roi, 0),
+                "win_rate": _as_float(win_rate, 0),
+                "weighted_win_rate": _as_float(weighted_win_rate, 0),
+                "profit_factor": _as_float(profit_factor, 0),
+                "score": _as_float(score, 0),
+                "sample_size": int(sample_size or 0),
+                "scanned_at": int(scanned_at or 0),
+            }
+            for address, alias, account_value, volume, pnl, roi, win_rate,
+            weighted_win_rate, profit_factor, score, sample_size, scanned_at in rows
+        ]
+
+    def delete_collected_account(self, address):
+        with self._lock:
+            self.conn.execute(
+                "DELETE FROM collected_accounts WHERE address = ?",
+                (str(address).lower(),),
             )
             self.conn.commit()
 

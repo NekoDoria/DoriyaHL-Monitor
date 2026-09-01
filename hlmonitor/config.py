@@ -72,6 +72,17 @@ class OrderConfig:
 
 
 @dataclass
+class HunterConfig:
+    min_account_value: float = 500_000.0   # 账户净值下限（USD）
+    min_volume: float = 10_000_000.0       # 全时段成交量下限（USD）
+    min_pnl: float = 0.0                   # 全时段盈亏下限（USD）
+    min_roi: float = 0.0                   # 全时段收益率下限
+    min_win_rate: float = 0.50             # 加权胜率下限（0-1）
+    candidates: int = 40                   # 粗筛后精算胜率的候选数
+    top_n: int = 10                        # 最终收集数量
+
+
+@dataclass
 class Config:
     addresses: list[str] = field(default_factory=list)
     network: str = "mainnet"
@@ -84,6 +95,7 @@ class Config:
     alerts: dict = field(default_factory=dict)
     rules: RuleConfig = field(default_factory=RuleConfig)
     order_merge: OrderConfig = field(default_factory=OrderConfig)
+    hunter: HunterConfig = field(default_factory=HunterConfig)
 
     @property
     def db_path(self) -> Path:
@@ -191,6 +203,26 @@ def load_config(path: str | os.PathLike | None = None) -> Config:
     if order_merge.max_gap_pct < order_merge.base_gap_pct:
         order_merge.max_gap_pct = order_merge.base_gap_pct
 
+    hunter_data = data.get("hunter", {})
+    hunter = HunterConfig(
+        min_account_value=max(
+            0.0,
+            _as_float(hunter_data.get("min_account_value", 500_000.0), 500_000.0),
+        ),
+        min_volume=max(
+            0.0,
+            _as_float(hunter_data.get("min_volume", 10_000_000.0), 10_000_000.0),
+        ),
+        min_pnl=_as_float(hunter_data.get("min_pnl", 0.0), 0.0),
+        min_roi=_as_float(hunter_data.get("min_roi", 0.0), 0.0),
+        min_win_rate=min(
+            1.0,
+            max(0.0, _as_float(hunter_data.get("min_win_rate", 0.50), 0.50)),
+        ),
+        candidates=max(1, _as_int(hunter_data.get("candidates", 40), 40)),
+        top_n=max(1, _as_int(hunter_data.get("top_n", 10), 10)),
+    )
+
     return Config(
         addresses=addresses,
         network=network,
@@ -205,4 +237,5 @@ def load_config(path: str | os.PathLike | None = None) -> Config:
         alerts=alerts,
         rules=rules,
         order_merge=order_merge,
+        hunter=hunter,
     )

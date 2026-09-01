@@ -23,6 +23,7 @@ from .format import (
     fmt_usd_cn,
     short_addr,
 )
+from .hunter import attach_charts, format_account_card_html, scan
 from .monitor import AddressMonitor
 from .net import build_opener
 from .state import EventStore
@@ -41,6 +42,8 @@ HELP_TEXT = """Hyperliquid 地址监控 Bot
 /tpsl [0x地址] - 查看当前挂着的止盈止损单
 /orders [0x地址] - 查看普通挂单：先选账户，再选标的，价格相近的会合并成密集区间
 /recent [条数] - 查看最近事件
+/hunt [数量] - 扫描 Hyperliquid 大户：按体量粗筛、精算胜率并收集
+/huntlist - 查看已收集的大户账户（可一键加入监控）
 /coins - 选择要接收交易通知的币种
 /mute - 暂停当前聊天的告警
 /unmute - 恢复当前聊天的告警
@@ -668,6 +671,27 @@ def format_fill_intervals_html(
     return "\n".join(body), total_pages
 
 
+
+def _rich_html(text):
+    """把旧 HTML 消息中的换行转成 <br>（保留 <pre> 内换行），适配富文本渲染。"""
+    parts = []
+    rest = text
+    while True:
+        start = rest.find("<pre>")
+        if start < 0:
+            parts.append(rest.replace("\n", "<br>"))
+            break
+        end = rest.find("</pre>", start)
+        if end < 0:
+            parts.append(rest[:start].replace("\n", "<br>"))
+            parts.append(rest[start:])
+            break
+        parts.append(rest[:start].replace("\n", "<br>"))
+        parts.append(rest[start:end + len("</pre>")])
+        rest = rest[end + len("</pre>"):]
+    return "".join(parts)
+
+
 class TelegramClient:
     def __init__(self, token, proxy_url=None, timeout=70):
         if not token:
@@ -736,6 +760,18 @@ class TelegramClient:
             payload["parse_mode"] = parse_mode
         if reply_markup is not None:
             payload["reply_markup"] = reply_markup
+        if parse_mode == "HTML":
+            try:
+                rich = {
+                    "chat_id": chat_id,
+                    "rich_message": {"html": _rich_html(text)},
+                    "disable_web_page_preview": True,
+                }
+                if reply_markup is not None:
+                    rich["reply_markup"] = reply_markup
+                return self._call("sendRichMessage", rich)
+            except Exception as exc:
+                print(f"[telegram] sendRichMessage 失败，回退旧格式: {exc}")
         return self._call("sendMessage", payload)
 
     def send_typing(self, chat_id):
@@ -758,7 +794,25 @@ class TelegramClient:
             payload["parse_mode"] = parse_mode
         if reply_markup is not None:
             payload["reply_markup"] = reply_markup
+        if parse_mode == "HTML":
+            try:
+                rich = {
+                    "chat_id": chat_id,
+                    "message_id": message_id,
+                    "rich_message": {"html": _rich_html(text)},
+                }
+                if reply_markup is not None:
+                    rich["reply_markup"] = reply_markup
+                return self._call("editMessageText", rich)
+            except Exception as exc:
+                print(f"[telegram] editMessageText(rich) 失败，回退旧格式: {exc}")
         return self._call("editMessageText", payload)
+
+    def delete_message(self, chat_id, message_id):
+        return self._call(
+            "deleteMessage",
+            {"chat_id": chat_id, "message_id": message_id},
+        )
 
     def answer_callback_query(self, callback_query_id, text=None):
         payload = {"callback_query_id": callback_query_id}
@@ -1403,6 +1457,22 @@ class TelegramBot:
             return
 
         text = (message.get("text") or "").strip()
+        pending_address = self.store.get_chat_setting(
+            chat_id,
+            f"pending_alias:{chat_id}",
+            None,
+        )
+        if pending_address:
+            first_word = (
+                text.split(maxsplit=1)[0].split("@", 1)[0].lower()
+                if text
+                else ""
+            )
+            if first_word == "/skip":
+                self._finish_alias(chat_id, pending_address, None)
+            elif text:
+                self._finish_alias(chat_id, pending_address, text)
+            return
         if not text.startswith("/"):
             return
 
@@ -1422,6 +1492,24 @@ class TelegramBot:
             return
         if self.allowed_chat_ids and chat_id not in self.allowed_chat_ids:
             self.client.answer_callback_query(callback_id, "没有权限。")
+            return
+
+        if data.startswith("hp:"):
+            self._handle_hunt_page_callback(
+                callback_id,
+                chat_id,
+                message_id,
+                data,
+            )
+            return
+
+        if data.startswith("hs:"):
+            self._handle_hunt_sub_callback(
+                callback_id,
+                chat_id,
+                message_id,
+                data,
+            )
             return
 
         if data.startswith("asb:"):
@@ -1758,6 +1846,69 @@ class TelegramBot:
             return
         self.client.answer_callback_query(callback_id)
 
+    def _handle_hunt_page_callback(self, callback_id, chat_id, message_id, data):
+        try:
+            page = int(data.split(":", 1)[1])
+        except (ValueError, IndexError):
+            self.client.answer_callback_query(callback_id)
+            return
+        results = self._load_hunt_session(chat_id)
+        rendered = self._hunt_page(chat_id, results, page)
+        if rendered is None:
+            self.client.answer_callback_query(callback_id)
+            return
+        text, keyboard = rendered
+        try:
+            self.client.edit_message_text(
+                chat_id,
+                message_id,
+                text,
+                reply_markup=keyboard,
+                parse_mode="HTML",
+            )
+        except Exception as exc:
+            print(f"[telegram] 切换大户页失败: {exc}")
+        self.client.answer_callback_query(callback_id)
+
+    def _handle_hunt_sub_callback(self, callback_id, chat_id, message_id, data):
+        try:
+            page = int(data.split(":", 1)[1])
+        except (ValueError, IndexError):
+            self.client.answer_callback_query(callback_id)
+            return
+        results = self._load_hunt_session(chat_id)
+        if page < 0 or page >= len(results):
+            self.client.answer_callback_query(callback_id)
+            return
+        address = str(results[page].get("address", ""))
+        now_ms = int(time.time() * 1000)
+        if self._is_subscribed(chat_id, address):
+            self.store.unsubscribe(chat_id, address)
+            self.monitor.set_addresses(
+                self.store.all_watched_addresses(active_only=False)
+            )
+            self.client.answer_callback_query(callback_id, "已取消订阅。")
+        else:
+            self.store.subscribe(chat_id, address, ts=now_ms)
+            self.monitor.set_addresses(
+                self.store.all_watched_addresses(active_only=False)
+            )
+            self.client.answer_callback_query(callback_id, "已加入监控。")
+            self._ask_alias(chat_id, address)
+        rendered = self._hunt_page(chat_id, results, page)
+        if rendered is not None:
+            text, keyboard = rendered
+            try:
+                self.client.edit_message_text(
+                    chat_id,
+                    message_id,
+                    text,
+                    reply_markup=keyboard,
+                    parse_mode="HTML",
+                )
+            except Exception as exc:
+                print(f"[telegram] 更新订阅状态失败: {exc}")
+
     def _handle_brief_page_callback(self, callback_id, chat_id, message_id, data):
         try:
             _, address, page_text = data.split(":", 2)
@@ -1897,6 +2048,10 @@ class TelegramBot:
             self._cmd_history(chat_id, args)
         elif command == "/tpsl":
             self._cmd_tpsl(chat_id, args)
+        elif command == "/hunt":
+            self._cmd_hunt(chat_id, args)
+        elif command == "/huntlist":
+            self._cmd_huntlist(chat_id)
         elif command == "/orders":
             self._cmd_orders(chat_id, args)
         elif command == "/recent":
@@ -2141,6 +2296,270 @@ class TelegramBot:
             )
         else:
             self.client.send_message(chat_id, report, parse_mode="HTML")
+
+    def _cmd_hunt(self, chat_id, args):
+        placeholder_id = self._send_loading(chat_id, "⏳ 正在扫描 Hyperliquid 大户…")
+        try:
+            limit = int(args.strip())
+            if limit <= 0:
+                limit = 0
+        except (TypeError, ValueError):
+            limit = 0
+
+        def progress(done, total, address):
+            if placeholder_id is not None and done % 3 == 0:
+                try:
+                    self.client.edit_message_text(
+                        chat_id,
+                        placeholder_id,
+                        f"⏳ 正在精算胜率 {done}/{total}…",
+                    )
+                except Exception:
+                    pass
+
+        def chart_progress(done, total, address):
+            if placeholder_id is not None and done % 2 == 0:
+                try:
+                    self.client.edit_message_text(
+                        chat_id,
+                        placeholder_id,
+                        f"⏳ 正在生成盈利曲线 {done}/{total}…",
+                    )
+                except Exception:
+                    pass
+
+        def work():
+            try:
+                results = scan(self.config, self.monitor.api, progress=progress)
+                if limit > 0:
+                    results = results[:limit]
+                for item in results:
+                    self.store.upsert_collected_account(item)
+                attach_charts(self.monitor.api, results, progress=chart_progress)
+                if not results:
+                    text = "当前没有符合条件的账户"
+                    if placeholder_id is not None:
+                        self.client.edit_message_text(
+                            chat_id,
+                            placeholder_id,
+                            text,
+                        )
+                    else:
+                        self.client.send_message(chat_id, text)
+                    return
+                self._store_hunt_session(chat_id, results)
+                rendered = self._hunt_page(chat_id, results, 0)
+                if rendered is None:
+                    return
+                text, keyboard = rendered
+                if placeholder_id is not None:
+                    self.client.edit_message_text(
+                        chat_id,
+                        placeholder_id,
+                        text,
+                        reply_markup=keyboard,
+                        parse_mode="HTML",
+                    )
+                else:
+                    self.client.send_message(
+                        chat_id,
+                        text,
+                        reply_markup=keyboard,
+                        parse_mode="HTML",
+                    )
+            except Exception as exc:
+                print(f"[telegram] 大户扫描失败: {exc}")
+                error_text = f"大户扫描失败: {exc}"
+                if placeholder_id is not None:
+                    self.client.edit_message_text(
+                        chat_id,
+                        placeholder_id,
+                        error_text,
+                    )
+                else:
+                    self.client.send_message(chat_id, error_text)
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _cmd_huntlist(self, chat_id):
+        accounts = self.store.get_collected_accounts()
+        if not accounts:
+            self.client.send_message(chat_id, "还没有收集到账户，先用 /hunt 扫描。")
+            return
+        placeholder_id = self._send_loading(chat_id, "⏳ 正在整理已收集账户…")
+
+        def chart_progress(done, total, address):
+            if placeholder_id is not None and done % 2 == 0:
+                try:
+                    self.client.edit_message_text(
+                        chat_id,
+                        placeholder_id,
+                        f"⏳ 正在生成盈利曲线 {done}/{total}…",
+                    )
+                except Exception:
+                    pass
+
+        def work():
+            try:
+                attach_charts(self.monitor.api, accounts, progress=chart_progress)
+                self._store_hunt_session(chat_id, accounts)
+                rendered = self._hunt_page(chat_id, accounts, 0)
+                if rendered is None:
+                    return
+                text, keyboard = rendered
+                if placeholder_id is not None:
+                    self.client.edit_message_text(
+                        chat_id,
+                        placeholder_id,
+                        text,
+                        reply_markup=keyboard,
+                        parse_mode="HTML",
+                    )
+                else:
+                    self.client.send_message(
+                        chat_id,
+                        text,
+                        reply_markup=keyboard,
+                        parse_mode="HTML",
+                    )
+            except Exception as exc:
+                print(f"[telegram] 查看已收集账户失败: {exc}")
+                error_text = f"查看已收集账户失败: {exc}"
+                if placeholder_id is not None:
+                    self.client.edit_message_text(
+                        chat_id,
+                        placeholder_id,
+                        error_text,
+                    )
+                else:
+                    self.client.send_message(chat_id, error_text)
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _store_hunt_session(self, chat_id, results):
+        self.store.set_chat_setting(
+            chat_id,
+            f"hunt_session:{chat_id}",
+            json.dumps(results, ensure_ascii=False),
+            int(time.time() * 1000),
+        )
+
+    def _load_hunt_session(self, chat_id):
+        raw = self.store.get_chat_setting(chat_id, f"hunt_session:{chat_id}", None)
+        if not raw:
+            return []
+        try:
+            data = json.loads(raw)
+            return data if isinstance(data, list) else []
+        except (TypeError, ValueError):
+            return []
+
+    def _is_subscribed(self, chat_id, address):
+        address = str(address).lower()
+        subscriptions = self.store.get_subscriptions(
+            chat_id=chat_id,
+            active_only=False,
+        )
+        return any(
+            str(sub["address"]).lower() == address for sub in subscriptions
+        )
+
+    def _hunt_card_keyboard(self, page, total, subscribed):
+        nav = []
+        if page > 0:
+            nav.append(
+                {"text": "◀️ 上一页", "callback_data": f"hp:{page - 1}"}
+            )
+        nav.append(
+            {
+                "text": "✅ 已订阅" if subscribed else "➕ 订阅",
+                "callback_data": f"hs:{page}",
+            }
+        )
+        if page < total - 1:
+            nav.append(
+                {"text": "下一页 ▶️", "callback_data": f"hp:{page + 1}"}
+            )
+        return {"inline_keyboard": [nav]}
+
+    def _hunt_page(self, chat_id, results, page):
+        if page < 0 or page >= len(results):
+            return None
+        account = dict(results[page])
+        subscriptions = self.store.get_subscriptions(
+            chat_id=chat_id,
+            active_only=False,
+        )
+        sub_map = {
+            str(sub["address"]).lower(): str(sub.get("alias") or "")
+            for sub in subscriptions
+        }
+        key = str(account.get("address", "")).lower()
+        account["alias"] = sub_map.get(key) or account.get("alias") or ""
+        text = format_account_card_html(account, page + 1, len(results))
+        keyboard = self._hunt_card_keyboard(
+            page,
+            len(results),
+            key in sub_map,
+        )
+        return text, keyboard
+
+    def _ask_alias(self, chat_id, address):
+        now_ms = int(time.time() * 1000)
+        self.store.set_chat_setting(
+            chat_id,
+            f"pending_alias:{chat_id}",
+            address,
+            now_ms,
+        )
+        result = self.client.send_message(
+            chat_id,
+            "给它起个名字吗？直接回复名字，或发送 /skip 跳过。",
+        )
+        prompt_id = (result or {}).get("message_id")
+        if prompt_id is not None:
+            self.store.set_chat_setting(
+                chat_id,
+                f"pending_alias_prompt:{chat_id}",
+                str(prompt_id),
+                now_ms,
+            )
+
+    def _finish_alias(self, chat_id, address, alias):
+        prompt_id = self.store.get_chat_setting(
+            chat_id,
+            f"pending_alias_prompt:{chat_id}",
+            None,
+        )
+        now_ms = int(time.time() * 1000)
+        self.store.set_chat_setting(chat_id, f"pending_alias:{chat_id}", "", now_ms)
+        self.store.set_chat_setting(
+            chat_id,
+            f"pending_alias_prompt:{chat_id}",
+            "",
+            now_ms,
+        )
+        if alias:
+            self.store.set_subscription_alias(chat_id, address, alias, ts=now_ms)
+            done_text = f"✅ 已命名：{alias}"
+        else:
+            done_text = "已跳过命名。"
+        if prompt_id:
+            try:
+                self.client.edit_message_text(chat_id, int(prompt_id), done_text)
+            except Exception as exc:
+                print(f"[telegram] 命名提示更新失败: {exc}")
+                self.client.send_message(chat_id, done_text)
+
+            def vanish():
+                try:
+                    self.client.delete_message(chat_id, int(prompt_id))
+                except Exception:
+                    pass
+
+            threading.Timer(4.0, vanish).start()
+        else:
+            self.client.send_message(chat_id, done_text)
 
     def _cmd_tpsl(self, chat_id, args):
         subscriptions = self.store.get_subscriptions(

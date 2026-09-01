@@ -55,3 +55,6 @@ class HyperliquidAPI:
 
     def user_funding(self, address):
         return self._post({"type": "userFunding", "user": address})
+
+    def portfolio(self, address):
+        return self._post({"type": "portfolio", "user": address})
