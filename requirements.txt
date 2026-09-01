@@ -1,0 +1,3 @@
+websocket-client>=1.8
+python-socks>=2.4
+PySocks>=1.7

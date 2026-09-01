@@ -1,0 +1,45 @@
+# Hyperliquid 地址监控示例配置
+# 复制为 config.toml 后填写你要监控的地址。
+
+[general]
+network = "mainnet"            # mainnet 或 testnet
+addresses = [
+    # 地址建议用双引号包裹；直接写 0x... 会被 TOML 当作整数，但程序也会兼容处理。
+    # "0x0000000000000000000000000000000000000000",
+]
+data_dir = "data"              # SQLite 数据目录
+poll_interval = 30.0           # REST 兜底轮询间隔，单位秒
+poll_on_start = true           # 启动时立即拉取一次快照
+ws_max_silence = 180.0         # WebSocket 超过该秒数无消息则自动重连
+position_sort = "value"        # 持仓简报默认排序：value=按仓位价值，time=按开仓时间
+
+[proxy]
+enabled = true
+url = "socks5://127.0.0.1:7890"
+
+[alerts]
+mode = "console"               # console / webhook / telegram / all
+
+[alerts.webhook]
+url = ""                       # 通用 Webhook 地址
+format = "generic"             # generic / discord / slack
+
+[alerts.telegram]
+bot_token = ""                # Telegram Bot token，用于交互式 Bot
+chat_id = ""                  # 可选：无聊天订阅时兜底接收告警的 chat_id
+allowed_chat_ids = []         # 可选：只允许这些 chat_id 使用 Bot；留空表示允许所有
+
+[rules]
+account_value_change_pct = 1.0   # 账户净值变化达到该百分比时告警
+position_delta_min_usd = 0.0     # 持仓名义变化达到该金额才告警
+ignore_ws_snapshots = true       # 忽略 WebSocket 连接时下发的历史快照
+alert_funding = false            # 是否告警资金费事件；默认关闭
+
+[orders]
+base_gap_pct = 0.2               # 挂单密集区间的最低合并阈值（百分比）
+vol_multiplier = 1.5             # 山寨自动放宽：阈值 = 币种典型小时波动 × 该倍数
+max_gap_pct = 2.0                # 合并阈值上限（百分比），防止波动过大的币过度合并
+vol_lookback_hours = 48          # 用最近多少小时的 1 小时 K 线估算币种波动
+width_multiplier = 3.0           # 单个区间最大宽度 = 合并阈值 × 该倍数，防止网格被链式合并成一整条
+ladder_min_orders = 5            # 至少多少笔才判定为均匀网格并整段合并
+ladder_max_cv = 0.30             # 相邻间距变异系数低于该值判定为均匀网格
