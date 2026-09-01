@@ -39,7 +39,7 @@ HELP_TEXT = """Hyperliquid 地址监控 Bot
 
 告警会自动发送到添加地址时所在的聊天。
 持仓简报下方有按钮，可直接切换按仓位价值或按开仓时间排序。
-成交通知会自动汇总为 5/15 分钟窗口，并在同一条实时消息中刷新。"""
+成交通知会自动汇总为多档周期（5分钟/15分钟/1小时/4小时/1天/3天/1周），并在同一条实时消息中刷新。"""
 
 
 def address_selector_rows(subscriptions, selected_address=None, prefix="as"):
@@ -251,6 +251,18 @@ def _as_float(value, default=0.0):
         return default
 
 
+FILL_WINDOWS = (
+    (5, "5分钟"),
+    (15, "15分钟"),
+    (60, "1小时"),
+    (240, "4小时"),
+    (1440, "1天"),
+    (4320, "3天"),
+    (10080, "1周"),
+)
+FILL_WINDOW_LABELS = {minutes: label for minutes, label in FILL_WINDOWS}
+
+
 def fill_stats_keyboard(
     address,
     window_min=5,
@@ -263,15 +275,19 @@ def fill_stats_keyboard(
             address_selector_rows(subscriptions, selected_address, "asf")
         )
     buttons = []
-    for window in (5, 15):
-        text = f"✅ {window}分钟" if window == window_min else f"{window}分钟"
+    for window, label in FILL_WINDOWS:
+        text = f"✅ {label}" if window == window_min else label
         buttons.append(
             {
                 "text": text,
                 "callback_data": f"fs:{address}:{window}",
             }
         )
-    rows.append(buttons)
+        if len(buttons) == 3:
+            rows.append(buttons)
+            buttons = []
+    if buttons:
+        rows.append(buttons)
     return {"inline_keyboard": rows}
 
 
@@ -282,7 +298,7 @@ def format_fill_stats_html(address, fills, window_min=5, now=None):
 
     lines = [
         f"<b>📈 成交统计 · {html.escape(short_addr(address))}</b>",
-        f"窗口: {window_min}分钟 | 更新时间: {html.escape(fmt_time(now))}",
+        f"窗口: {FILL_WINDOW_LABELS.get(window_min, str(window_min) + '分钟')} | 更新时间: {html.escape(fmt_time(now))}",
     ]
     if not recent:
         lines.append("")
@@ -460,14 +476,16 @@ class TelegramClient:
 class TelegramRouter:
     """Route monitor events to chats subscribed to the affected address."""
 
-    def __init__(self, client: TelegramClient, store: EventStore, fallback_chat_id=None):
+    def __init__(self, client: TelegramClient, store: EventStore, fallback_chat_id=None, api=None):
         self.client = client
         self.store = store
         self.fallback_chat_id = str(fallback_chat_id) if fallback_chat_id else None
+        self.api = api
         self._fill_buffers = {}
         self._fill_lock = threading.RLock()
         self._fill_dirty = set()
         self._fill_timer = None
+        self._api_fill_cache = {}
 
     def _subscriptions_for_chat(self, chat_id):
         return self.store.get_subscriptions(chat_id=chat_id, active_only=False)
@@ -716,13 +734,9 @@ class TelegramRouter:
         with self._fill_lock:
             dirty = list(self._fill_dirty)
             self._fill_dirty.clear()
-            snapshots = {
-                key: list(self._fill_buffers.get(key, []))
-                for key in dirty
-            }
             self._fill_timer = None
 
-        for key, fills in snapshots.items():
+        for key in dirty:
             chat_id, address = key
             selected_address = self._get_or_create_selected_fill_stats_address(
                 chat_id,
@@ -739,28 +753,92 @@ class TelegramRouter:
                 self._publish_fill_stats(
                     chat_id,
                     address,
-                    fills,
+                    None,
                     selected_address=selected_address,
                 )
             except Exception as exc:
                 print(f"[telegram] 刷新成交统计失败 ({chat_id}): {exc}")
 
     def refresh_fill_stats(self, chat_id, address, force_new=False):
-        with self._fill_lock:
-            fills = list(self._fill_buffers.get((chat_id, address), []))
         self._publish_fill_stats(
             chat_id,
             address,
-            fills,
+            None,
             selected_address=address,
             force_new=force_new,
         )
+
+    def _stats_fills(self, chat_id, address, window_min):
+        """合并实时缓冲与（长期窗口）API 历史成交，按时间倒序去重。"""
+        with self._fill_lock:
+            merged = list(self._fill_buffers.get((chat_id, address), []))
+        if self.api is not None and window_min > 15:
+            merged.extend(self._fetch_api_fills(address, window_min))
+        seen = set()
+        result = []
+        for fill in merged:
+            try:
+                key = (
+                    int(fill.get("time") or 0),
+                    str(fill.get("coin") or "?"),
+                    str(fill.get("side") or "").upper(),
+                    round(float(fill.get("sz") or 0), 8),
+                    round(float(fill.get("px") or 0), 8),
+                )
+            except (TypeError, ValueError):
+                continue
+            if key in seen:
+                continue
+            seen.add(key)
+            result.append(fill)
+        result.sort(key=lambda item: int(item.get("time") or 0), reverse=True)
+        return result[:5000]
+
+    def _fetch_api_fills(self, address, window_min):
+        """从 Hyperliquid API 拉取指定窗口的历史成交（60 秒缓存）。"""
+        cache_key = (address, window_min)
+        now = time.time()
+        with self._fill_lock:
+            cached_at, cached = self._api_fill_cache.get(cache_key, (0.0, []))
+            if now - cached_at < 60:
+                return cached
+        start_ms = int(time.time() * 1000) - window_min * 60_000
+        try:
+            raw = self.api.user_fills_by_time(address, start_ms) or []
+        except Exception as exc:
+            print(f"[telegram] 拉取历史成交失败 ({short_addr(address)}): {exc}")
+            return []
+        normalized = []
+        for fill in raw:
+            side = str(fill.get("side") or "").upper()
+            if side not in {"B", "A"}:
+                continue
+            try:
+                timestamp = int(fill.get("time") or 0)
+                sz = float(fill.get("sz") or 0)
+                px = float(fill.get("px") or 0)
+            except (TypeError, ValueError):
+                continue
+            if not timestamp:
+                continue
+            normalized.append(
+                {
+                    "time": timestamp,
+                    "coin": str(fill.get("coin") or "?"),
+                    "side": side,
+                    "sz": str(sz),
+                    "px": str(px),
+                }
+            )
+        with self._fill_lock:
+            self._api_fill_cache[cache_key] = (time.time(), normalized)
+        return normalized
 
     def _publish_fill_stats(
         self,
         chat_id,
         address,
-        fills,
+        fills=None,
         selected_address=None,
         force_new=False,
     ):
@@ -774,8 +852,11 @@ class TelegramRouter:
             )
         except (TypeError, ValueError):
             window_min = 5
-        if window_min not in {5, 15}:
+        if window_min not in FILL_WINDOW_LABELS:
             window_min = 5
+
+        if fills is None:
+            fills = self._stats_fills(chat_id, address, window_min)
 
         text = format_fill_stats_html(address, fills, window_min)
         reply_markup = fill_stats_keyboard(
@@ -846,16 +927,19 @@ class TelegramBot:
             proxy_url=config.proxy_url,
         )
         self.store = store or EventStore(str(config.db_path))
+        self.monitor = monitor or AddressMonitor(
+            config,
+            store=self.store,
+            notifier=None,
+        )
         self.router = TelegramRouter(
             self.client,
             self.store,
             fallback_chat_id=self.fallback_chat_id,
+            api=self.monitor.api,
         )
-        self.monitor = monitor or AddressMonitor(
-            config,
-            store=self.store,
-            notifier=self.router,
-        )
+        if monitor is None:
+            self.monitor.notifier = self.router
         self._stop = threading.Event()
         self._poll_thread = None
         self._update_offset = None
@@ -1131,7 +1215,7 @@ class TelegramBot:
         except (ValueError, TypeError):
             self.client.answer_callback_query(callback_id)
             return
-        if window_min not in {5, 15}:
+        if window_min not in FILL_WINDOW_LABELS:
             self.client.answer_callback_query(callback_id)
             return
 
@@ -1147,7 +1231,7 @@ class TelegramBot:
             print(f"[telegram] 切换成交统计窗口失败: {exc}")
             self.client.answer_callback_query(callback_id, "切换失败，请重试。")
             return
-        self.client.answer_callback_query(callback_id, f"已切换为{window_min}分钟窗口。")
+        self.client.answer_callback_query(callback_id, f"已切换为{FILL_WINDOW_LABELS[window_min]}窗口。")
 
     def _handle_brief_address_callback(self, callback_id, chat_id, message_id, data):
         try:
