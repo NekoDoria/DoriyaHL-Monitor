@@ -68,6 +68,7 @@ class AddressMonitor:
         self._poll_thread: threading.Thread | None = None
         self._started = False
         self._open_time_cache: dict[str, tuple[int, dict[str, int]]] = {}
+        self._realized_pnl_cache: dict[str, tuple[float, float]] = {}
         self._spot_meta_cache: dict[str, str] = {}
         self._spot_meta_at = 0.0
         self._vol_cache: dict[str, tuple[float, float | None]] = {}
@@ -176,13 +177,15 @@ class AddressMonitor:
         previous_positions = self.store.get_positions(address)
         positions = self._attach_open_times(address, positions, previous_positions)
 
+        summary = {
+            "account_value": account_value,
+            "total_ntl_pos": total_ntl_pos,
+            "withdrawable": withdrawable,
+        }
+        self._add_pnl_summary(address, summary, positions)
         return {
             "address": address,
-            "summary": {
-                "account_value": account_value,
-                "total_ntl_pos": total_ntl_pos,
-                "withdrawable": withdrawable,
-            },
+            "summary": summary,
             "positions": positions,
             "spot_balances": spot_balances,
             "changes": {},
@@ -596,6 +599,12 @@ class AddressMonitor:
         previous_positions = self.store.get_positions(address)
         previous_spot_balances = self.store.get_spot_balances(address)
         positions = self._attach_open_times(address, positions, previous_positions)
+        summary = {
+            "account_value": account_value,
+            "total_ntl_pos": total_ntl_pos,
+            "withdrawable": withdrawable,
+        }
+        self._add_pnl_summary(address, summary, positions)
 
         self.store.save_positions(address, positions, now)
         self.store.save_spot_balances(address, spot_balances, now)
@@ -636,11 +645,7 @@ class AddressMonitor:
             previous_positions,
             positions,
             spot_balances,
-            {
-                "account_value": account_value,
-                "total_ntl_pos": total_ntl_pos,
-                "withdrawable": withdrawable,
-            },
+            summary,
             now,
         )
         self._detect_spot_balance_changes(
@@ -663,9 +668,35 @@ class AddressMonitor:
                 "szi": position.get("szi", "0"),
                 "entry_px": position.get("entryPx", ""),
                 "notional": position.get("positionValue", position.get("notional", "0")),
+                "unrealized_pnl": position.get("unrealizedPnl", ""),
                 "leverage": self._extract_leverage(position.get("leverage")),
             }
         return positions
+
+    def _realized_pnl(self, address):
+        """从最近成交记录累加已实现盈亏（closedPnl + 手续费），带 5 分钟缓存。"""
+        cached_at, cached = self._realized_pnl_cache.get(address, (0.0, None))
+        now = time.time()
+        if cached_at and now - cached_at < 300:
+            return cached
+        fills = self._fetch_fill_history(address)
+        realized = sum(
+            _num(fill.get("closedPnl")) + _num(fill.get("fee"))
+            for fill in fills
+        )
+        self._realized_pnl_cache[address] = (now, realized)
+        return realized
+
+    def _add_pnl_summary(self, address, summary, positions):
+        summary["unrealized_pnl"] = sum(
+            _num(pos.get("unrealized_pnl")) for pos in positions.values()
+        )
+        try:
+            summary["realized_pnl"] = self._realized_pnl(address)
+        except Exception as exc:
+            print(f"[pnl] 拉取已实现盈亏失败 ({short_addr(address)}): {exc}")
+            summary["realized_pnl"] = None
+        return summary
 
     @staticmethod
     def _extract_leverage(leverage):

@@ -13,6 +13,16 @@ def fmt_time(ms):
         return str(ms)
 
 
+def fmt_time_min(ms):
+    """毫秒时间戳 -> 本地时间字符串（精确到分钟）。"""
+    if ms is None:
+        return "-"
+    try:
+        return datetime.fromtimestamp(ms / 1000).strftime("%m-%d %H:%M")
+    except (OverflowError, OSError, ValueError):
+        return str(ms)
+
+
 def fmt_usd(x, decimals=2):
     try:
         return f"{float(x):,.{decimals}f}"
@@ -30,12 +40,12 @@ def fmt_usd_cn(x, decimals=2):
     sign = "-" if value < 0 else ""
     magnitude = abs(value)
     if magnitude >= 100_000_000:
-        return f"{sign}${value / 100_000_000:,.{decimals}f}亿"
+        return f"{sign}${magnitude / 100_000_000:,.{decimals}f}亿"
     if magnitude >= 10_000_000:
-        return f"{sign}${value / 10_000_000:,.{decimals}f}千万"
+        return f"{sign}${magnitude / 10_000_000:,.{decimals}f}千万"
     if magnitude >= 10_000:
-        return f"{sign}${value / 10_000:,.{decimals}f}万"
-    return f"${value:,.{decimals}f}"
+        return f"{sign}${magnitude / 10_000:,.{decimals}f}万"
+    return f"{sign}${magnitude:,.{decimals}f}"
 
 
 def fmt_qty(x, decimals=2):

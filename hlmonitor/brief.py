@@ -65,6 +65,14 @@ def _progress_bar(ratio, length=10):
     return "█" * filled + "░" * (length - filled)
 
 
+def _fmt_pnl(value):
+    if value is None:
+        return "-"
+    num = _num(value)
+    sign = "+" if num > 0 else ""
+    return f"{sign}{fmt_usd_cn(num)}"
+
+
 BRIEF_PAGE_SIZE = 5
 
 
@@ -88,6 +96,8 @@ def format_position_brief(
     lines = [
         f"📊 {title} · {short_addr(address)}",
         f"账户净值: {fmt_usd_cn(summary.get('account_value', 0))}",
+        f"浮动盈亏: {_fmt_pnl(summary.get('unrealized_pnl'))}",
+        f"已结盈亏: {_fmt_pnl(summary.get('realized_pnl'))}",
         f"合约持仓名义: {fmt_usd_cn(summary.get('total_ntl_pos', 0))}",
         f"可提取: {fmt_usd_cn(summary.get('withdrawable', 0))}",
         f"排序: {sort_label}",
@@ -104,12 +114,20 @@ def format_position_brief(
             open_label = fmt_time(open_time) if open_time else "未知"
             if index:
                 lines.append("─────────────────────")
-            lines.append(f"{coin} · {side}")
+            lev = leverage_label(pos)
+            title = f"{coin} · {side}"
+            if lev != "-":
+                title += f" {lev}"
+            lines.append(title)
             if coin in changes:
                 lines.append(f"  变动: {changes[coin]}")
+            peak = _num(pos.get("peak_notional") or notional)
+            peak_ratio = notional / peak if peak else 0
+            lines.append(f"  浮动盈亏: {_fmt_pnl(pos.get('unrealized_pnl'))}")
             lines.append(f"  持仓: {fmt_usd_cn(notional)}")
-            lines.append(f"  峰值: {fmt_usd_cn(pos.get('peak_notional') or notional)}")
-            lines.append(f"  杠杆: {leverage_label(pos)}")
+            lines.append(
+                f"  峰值进度: {_progress_bar(peak_ratio)} {peak_ratio * 100:.1f}% · 峰值 {fmt_usd_cn(peak)}"
+            )
             lines.append(f"  入场价: {entry}")
             lines.append(f"  开仓时间: {open_label}")
     else:
@@ -188,6 +206,8 @@ def format_position_brief_html(
         [
             f"<b>📊 {html.escape(title)} · {html.escape(short_addr(address))}</b>",
             f"账户净值: {html.escape(fmt_usd_cn(summary.get('account_value', 0)))}",
+            f"浮动盈亏: {html.escape(_fmt_pnl(summary.get('unrealized_pnl')))}",
+            f"已结盈亏: {html.escape(_fmt_pnl(summary.get('realized_pnl')))}",
             f"合约持仓名义: {html.escape(fmt_usd_cn(summary.get('total_ntl_pos', 0)))}",
             f"可提取: {html.escape(fmt_usd_cn(summary.get('withdrawable', 0)))}",
             f"排序: {sort_label}",
@@ -196,7 +216,6 @@ def format_position_brief_html(
 
     blocks = [header]
     if page_positions:
-        total_ntl_pos = abs(_num(summary.get("total_ntl_pos")))
         for pos in page_positions:
             coin = pos.get("coin", "?")
             side = side_label(pos.get("szi"))
@@ -205,23 +224,24 @@ def format_position_brief_html(
             open_time = pos.get("open_time_ms") or 0
             open_label = fmt_time(open_time) if open_time else "未知"
 
-            ratio = notional / total_ntl_pos if total_ntl_pos else 0
+            lev = leverage_label(pos)
             title_line = f"<b>{html.escape(coin)}</b> · {side}"
+            if lev != "-":
+                title_line += f" {lev}"
+            peak = _num(pos.get("peak_notional") or notional)
+            peak_ratio = notional / peak if peak else 0
             lines = []
             if coin in changes:
                 lines.append(html.escape(f"变动: {changes[coin]}"))
             lines.extend(
                 [
+                    html.escape(f"浮动盈亏: {_fmt_pnl(pos.get('unrealized_pnl'))}"),
                     html.escape(f"持仓: {fmt_usd_cn(notional)}"),
                     html.escape(
-                        f"峰值: {fmt_usd_cn(pos.get('peak_notional') or notional)}"
+                        f"峰值进度: {_progress_bar(peak_ratio)} {peak_ratio * 100:.1f}% · 峰值 {fmt_usd_cn(peak)}"
                     ),
-                    html.escape(f"杠杆: {leverage_label(pos)}"),
                     html.escape(f"入场价: {entry}"),
                     html.escape(f"开仓时间: {open_label}"),
-                    html.escape(
-                        f"占比: {_progress_bar(ratio)} {ratio * 100:.1f}%"
-                    ),
                 ]
             )
             body = "\n".join(lines)

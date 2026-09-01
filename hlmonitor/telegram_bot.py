@@ -13,7 +13,16 @@ import urllib.request
 
 from .config import Config, normalize_address
 from .brief import BRIEF_PAGE_SIZE, format_position_brief_html_data, sort_positions
-from .format import fmt_szi, fmt_time, fmt_usd_cn, short_addr
+from .format import (
+    fmt_dir,
+    fmt_qty,
+    fmt_side,
+    fmt_szi,
+    fmt_time,
+    fmt_time_min,
+    fmt_usd_cn,
+    short_addr,
+)
 from .monitor import AddressMonitor
 from .net import build_opener
 from .state import EventStore
@@ -262,12 +271,22 @@ FILL_WINDOWS = (
 )
 FILL_WINDOW_LABELS = {minutes: label for minutes, label in FILL_WINDOWS}
 
+FILL_STATS_VIEWS = (
+    ("summary", "汇总"),
+    ("timeline", "流水"),
+    ("interval", "区间"),
+)
+FILL_STATS_VIEW_LABELS = {key: label for key, label in FILL_STATS_VIEWS}
+
 
 def fill_stats_keyboard(
     address,
     window_min=5,
     subscriptions=None,
     selected_address=None,
+    view="summary",
+    page=0,
+    page_count=1,
 ):
     rows = []
     if subscriptions:
@@ -288,51 +307,98 @@ def fill_stats_keyboard(
             buttons = []
     if buttons:
         rows.append(buttons)
+    view_buttons = []
+    for key, label in FILL_STATS_VIEWS:
+        text = f"✅ {label}" if key == view else label
+        view_buttons.append(
+            {
+                "text": text,
+                "callback_data": f"fv:{address}:{key}",
+            }
+        )
+    rows.append(view_buttons)
+    if page_count > 1:
+        nav = []
+        if page > 0:
+            nav.append(
+                {
+                    "text": "◀️ 上一页",
+                    "callback_data": f"fp:{address}:{view}:{page - 1}",
+                }
+            )
+        nav.append(
+            {
+                "text": f"{page + 1}/{page_count}",
+                "callback_data": "ignore",
+            }
+        )
+        if page < page_count - 1:
+            nav.append(
+                {
+                    "text": "下一页 ▶️",
+                    "callback_data": f"fp:{address}:{view}:{page + 1}",
+                }
+            )
+        rows.append(nav)
     return {"inline_keyboard": rows}
 
 
-def format_fill_stats_html(address, fills, window_min=5, now=None):
+def format_fill_stats_html(address, fills, window_min=5, now=None, page=0, page_size=10):
     now = now or int(time.time() * 1000)
     cutoff = now - window_min * 60_000
     recent = [fill for fill in fills if int(fill.get("time") or 0) >= cutoff]
 
     lines = [
         f"<b>📈 成交统计 · {html.escape(short_addr(address))}</b>",
-        f"窗口: {FILL_WINDOW_LABELS.get(window_min, str(window_min) + '分钟')} | 更新时间: {html.escape(fmt_time(now))}",
+        f"窗口: {FILL_WINDOW_LABELS.get(window_min, str(window_min) + '分钟')} | 更新时间: {html.escape(fmt_time_min(now))}",
     ]
     if not recent:
         lines.append("")
         lines.append("当前窗口暂无成交")
-        return "\n".join(lines)
+        return "\n".join(lines), 1
 
     grouped = {}
     for fill in recent:
         coin = fill.get("coin", "?")
         size = abs(_as_float(fill.get("sz")))
         price = _as_float(fill.get("px"))
+        bucket = (
+            "close"
+            if str(fill.get("dir") or "").lower().startswith("close")
+            else "open"
+        )
         item = grouped.setdefault(
             coin,
             {
                 "count": 0,
-                "size": 0.0,
                 "notional": 0.0,
-                "buy_size": 0.0,
                 "buy_notional": 0.0,
-                "sell_size": 0.0,
                 "sell_notional": 0.0,
+                "open_count": 0,
+                "open_buy_size": 0.0,
+                "open_buy_notional": 0.0,
+                "open_sell_size": 0.0,
+                "open_sell_notional": 0.0,
+                "close_count": 0,
+                "close_buy_size": 0.0,
+                "close_buy_notional": 0.0,
+                "close_sell_size": 0.0,
+                "close_sell_notional": 0.0,
                 "last_time": 0,
             },
         )
         item["count"] += 1
-        item["size"] += size
+        item[f"{bucket}_count"] += 1
         value = size * price
         item["notional"] += value
         if fill.get("side") == "B":
-            item["buy_size"] += size
             item["buy_notional"] += value
+            item[f"{bucket}_buy_size"] += size
+            item[f"{bucket}_buy_notional"] += value
         else:
-            item["sell_size"] += size
             item["sell_notional"] += value
+            item[f"{bucket}_sell_size"] += size
+            item[f"{bucket}_sell_notional"] += value
         item["last_time"] = max(item["last_time"], int(fill.get("time") or 0))
 
     ordered = sorted(
@@ -340,10 +406,14 @@ def format_fill_stats_html(address, fills, window_min=5, now=None):
         key=lambda item: item[1]["notional"],
         reverse=True,
     )
+    total_pages = max(1, math.ceil(len(ordered) / page_size))
+    page = max(0, min(page, total_pages - 1))
+    page_coins = ordered[page * page_size : (page + 1) * page_size]
+
     total_notional = sum(item["notional"] for _, item in ordered)
     lines.append(f"总成交额: {html.escape(fmt_usd_cn(total_notional))}")
 
-    for coin, stat in ordered[:20]:
+    for coin, stat in page_coins:
         net = stat["buy_notional"] - stat["sell_notional"]
         if net > 1e-9:
             direction = "净多"
@@ -351,30 +421,251 @@ def format_fill_stats_html(address, fills, window_min=5, now=None):
             direction = "净空"
         else:
             direction = "均衡"
-        body = "\n".join(
-            [
-                html.escape(f"笔数: {stat['count']}"),
-                html.escape(
-                    f"买入: {fmt_szi(stat['buy_size'])} / "
-                    f"{fmt_usd_cn(stat['buy_notional'])}"
-                ),
-                html.escape(
-                    f"卖出: {fmt_szi(stat['sell_size'])} / "
-                    f"{fmt_usd_cn(stat['sell_notional'])}"
-                ),
-                html.escape(f"成交额: {fmt_usd_cn(stat['notional'])}"),
-                html.escape(f"最近: {fmt_time(stat['last_time'])}"),
-            ]
+        body_lines = []
+        for label, count, buy_notional, buy_size, sell_notional, sell_size in (
+            ("开仓", stat["open_count"], stat["open_buy_notional"], stat["open_buy_size"], stat["open_sell_notional"], stat["open_sell_size"]),
+            ("平仓", stat["close_count"], stat["close_buy_notional"], stat["close_buy_size"], stat["close_sell_notional"], stat["close_sell_size"]),
+        ):
+            if count <= 0:
+                continue
+            body_lines.append(f"{label} | {count}笔")
+            if buy_notional > 1e-9:
+                body_lines.append(f"买入 {fmt_usd_cn(buy_notional)} / {fmt_szi(buy_size)}")
+            if sell_notional > 1e-9:
+                body_lines.append(f"卖出 {fmt_usd_cn(sell_notional)} / {fmt_szi(sell_size)}")
+        body_lines.append(
+            f"成交额: {fmt_usd_cn(stat['notional'])} · 最近: {fmt_time_min(stat['last_time'])}"
         )
+        body = "\n".join(html.escape(line) for line in body_lines)
         lines.append("")
         lines.append(
             f"<b>{html.escape(coin)} · {direction}</b>\n"
             f"<blockquote expandable>{body}</blockquote>"
         )
-    if len(ordered) > 20:
+    return "\n".join(lines), total_pages
+
+
+def format_fill_timeline_html(address, fills, window_min=5, now=None, page=0, page_size=20):
+    now = now or int(time.time() * 1000)
+    cutoff = now - window_min * 60_000
+    recent = [fill for fill in fills if int(fill.get("time") or 0) >= cutoff]
+
+    lines = [
+        f"<b>📈 成交流水 · {html.escape(short_addr(address))}</b>",
+        f"窗口: {FILL_WINDOW_LABELS.get(window_min, str(window_min) + '分钟')} | 共 {len(recent)} 笔 | 更新时间: {html.escape(fmt_time_min(now))}",
+    ]
+    if not recent:
         lines.append("")
-        lines.append(f"... 其余 {len(ordered) - 20} 个标的省略")
-    return "\n".join(lines)
+        lines.append("当前窗口暂无成交")
+        return "\n".join(lines), 1
+
+    total_pages = max(1, math.ceil(len(recent) / page_size))
+    page = max(0, min(page, total_pages - 1))
+    ordered = sorted(
+        recent,
+        key=lambda fill: int(fill.get("time") or 0),
+        reverse=True,
+    )
+    rows = []
+    for fill in ordered[page * page_size : (page + 1) * page_size]:
+        coin = str(fill.get("coin") or "?")
+        size = abs(_as_float(fill.get("sz")))
+        price = _as_float(fill.get("px"))
+        label = fmt_dir(fill.get("dir")) or fmt_side(fill.get("side"))
+        rows.append(
+            f"{fmt_time_min(fill.get('time'))} {coin} {label} "
+            f"{fmt_szi(size)} @ {fmt_qty(price)} ≈{fmt_usd_cn(size * price)}"
+        )
+    lines.append("")
+    lines.append(
+        "<blockquote expandable>"
+        + "\n".join(html.escape(row) for row in rows)
+        + "</blockquote>"
+    )
+    return "\n".join(lines), total_pages
+
+
+def _cluster_fills_by_price(fills, max_gap_pct=0.2):
+    """把同币种、同方向、价格相近的成交合并成密集区间。"""
+    groups = {}
+    for fill in fills:
+        coin = str(fill.get("coin") or "?")
+        side = str(fill.get("side") or "").upper()
+        px = _as_float(fill.get("px"))
+        sz = abs(_as_float(fill.get("sz")))
+        if side not in {"B", "A"} or px <= 0 or sz <= 0:
+            continue
+        groups.setdefault((coin, side), []).append(fill)
+
+    clusters = []
+    for (coin, side), group in groups.items():
+        group = sorted(group, key=lambda f: _as_float(f.get("px")))
+        current = []
+        for fill in group:
+            px = _as_float(fill.get("px"))
+            if current:
+                last_px = _as_float(current[-1].get("px"))
+                first_px = _as_float(current[0].get("px"))
+                gap_pct = (px - last_px) / last_px * 100 if last_px else 0
+                width_pct = (px - first_px) / first_px * 100 if first_px else 0
+                if gap_pct > max_gap_pct or width_pct > max_gap_pct * 3:
+                    clusters.append(current)
+                    current = []
+            current.append(fill)
+        if current:
+            clusters.append(current)
+    return clusters
+
+
+def _cluster_interval_stats(cluster):
+    sizes = [abs(_as_float(f.get("sz"))) for f in cluster]
+    pxs = [_as_float(f.get("px")) for f in cluster]
+    total_sz = sum(sizes)
+    total_value = sum(px * size for px, size in zip(pxs, sizes))
+    avg_px = total_value / total_sz if total_sz > 0 else (min(pxs) + max(pxs)) / 2
+    dir_counts = {}
+    for f in cluster:
+        d = fmt_dir(f.get("dir"))
+        if d:
+            dir_counts[d] = dir_counts.get(d, 0) + 1
+    times = sorted(int(f.get("time") or 0) for f in cluster)
+    return {
+        "side": "买入" if str(cluster[0].get("side", "")).upper() == "B" else "卖出",
+        "count": len(cluster),
+        "min_px": min(pxs),
+        "max_px": max(pxs),
+        "avg_px": avg_px,
+        "total_sz": total_sz,
+        "total_value": total_value,
+        "dir_counts": dir_counts,
+        "first_time": times[0],
+        "last_time": times[-1],
+    }
+
+
+def format_fill_intervals_html(
+    address,
+    fills,
+    window_min=5,
+    now=None,
+    page=0,
+    max_coins=10,
+    max_clusters=6,
+    max_page_len=3400,
+):
+    now = now or int(time.time() * 1000)
+    cutoff = now - window_min * 60_000
+    recent = [fill for fill in fills if int(fill.get("time") or 0) >= cutoff]
+
+    lines = [
+        f"<b>📈 成交区间 · {html.escape(short_addr(address))}</b>",
+        f"窗口: {FILL_WINDOW_LABELS.get(window_min, str(window_min) + '分钟')} | 共 {len(recent)} 笔 | 更新时间: {html.escape(fmt_time_min(now))}",
+    ]
+    if not recent:
+        lines.append("")
+        lines.append("当前窗口暂无成交")
+        return "\n".join(lines), 1
+
+    total_notional = sum(
+        abs(_as_float(f.get("sz"))) * _as_float(f.get("px")) for f in recent
+    )
+    lines.append(f"总成交额: {html.escape(fmt_usd_cn(total_notional))}")
+
+    coin_notional = {}
+    for fill in recent:
+        coin = str(fill.get("coin") or "?")
+        coin_notional[coin] = coin_notional.get(coin, 0.0) + abs(
+            _as_float(fill.get("sz"))
+        ) * _as_float(fill.get("px"))
+    ordered_coins = sorted(
+        coin_notional.items(),
+        key=lambda kv: kv[1],
+        reverse=True,
+    )[:max_coins]
+
+    blocks = []
+    for coin, _notional in ordered_coins:
+        coin_fills = [f for f in recent if str(f.get("coin") or "?") == coin]
+        clusters = _cluster_fills_by_price(coin_fills)
+        clusters.sort(
+            key=lambda c: max(int(f.get("time") or 0) for f in c),
+            reverse=True,
+        )
+        side_groups = []
+        side_index = {}
+        for cluster in clusters[:max_clusters]:
+            side = str(cluster[0].get("side") or "").upper()
+            if side not in side_index:
+                side_index[side] = len(side_groups)
+                side_groups.append((side, []))
+            side_groups[side_index[side]][1].append(cluster)
+        side_blocks = []
+        for side, cluster_list in side_groups:
+            block_lines = []
+            for cluster in cluster_list:
+                stat = _cluster_interval_stats(cluster)
+                dir_text = " · ".join(
+                    f"{k}×{v}" for k, v in sorted(stat["dir_counts"].items())
+                )
+                head = f"{stat['side']} · {stat['count']}笔"
+                if dir_text:
+                    head += f"（{dir_text}）"
+                range_line = (
+                    f"价格: {fmt_qty(stat['min_px'])}"
+                    if stat["min_px"] == stat["max_px"]
+                    else f"区间: {fmt_qty(stat['min_px'])} – {fmt_qty(stat['max_px'])}"
+                )
+                block_lines.extend(
+                    [
+                        head,
+                        range_line,
+                        f"均价: {fmt_qty(stat['avg_px'])} · 数量: {fmt_szi(stat['total_sz'])} · {fmt_usd_cn(stat['total_value'])}",
+                        f"时间: {fmt_time_min(stat['first_time'])} – {fmt_time_min(stat['last_time'])}",
+                        "",
+                    ]
+                )
+                if len("\n".join(block_lines)) > 1400:
+                    block_lines.append("... 本方向其余区间省略")
+                    break
+            if block_lines and block_lines[-1] == "":
+                block_lines.pop()
+            if not block_lines:
+                continue
+            side_blocks.append(
+                "<blockquote expandable>"
+                + "\n".join(html.escape(line) for line in block_lines)
+                + "</blockquote>"
+            )
+        if side_blocks:
+            blocks.append((coin, side_blocks))
+
+    pages = []
+    current = []
+    current_len = len("\n".join(lines))
+    for coin, side_blocks in blocks:
+        block_len = (
+            len(f"<b>{coin}</b>")
+            + sum(len(b) for b in side_blocks)
+            + len(side_blocks) * 2
+            + 3
+        )
+        if current and current_len + block_len + 2 > max_page_len:
+            pages.append(current)
+            current = []
+            current_len = len("\n".join(lines))
+        current.append((coin, side_blocks))
+        current_len += block_len + 2
+    if current:
+        pages.append(current)
+
+    total_pages = max(1, len(pages))
+    page = max(0, min(page, total_pages - 1))
+    body = list(lines)
+    for coin, side_blocks in pages[page]:
+        body.append("")
+        body.append(f"<b>{html.escape(coin)}</b>")
+        body.extend(side_blocks)
+    return "\n".join(body), total_pages
 
 
 class TelegramClient:
@@ -446,6 +737,9 @@ class TelegramClient:
         if reply_markup is not None:
             payload["reply_markup"] = reply_markup
         return self._call("sendMessage", payload)
+
+    def send_typing(self, chat_id):
+        return self._call("sendChatAction", {"chat_id": chat_id, "action": "typing"})
 
     def edit_message_text(
         self,
@@ -634,6 +928,12 @@ class TelegramRouter:
                     reply_markup=reply_markup,
                     parse_mode="HTML",
                 )
+                self.store.set_chat_setting(
+                    chat_id,
+                    key,
+                    str(target_message_id),
+                    int(time.time() * 1000),
+                )
             except Exception as exc:
                 print(f"[telegram] 更新指定简报失败: {exc}")
             return
@@ -705,6 +1005,7 @@ class TelegramRouter:
                     "time": timestamp,
                     "coin": fill.get("coin"),
                     "side": str(fill.get("side", "")).upper(),
+                    "dir": fill.get("dir"),
                     "sz": fill.get("sz", "0"),
                     "px": fill.get("px", "0"),
                 }
@@ -759,13 +1060,14 @@ class TelegramRouter:
             except Exception as exc:
                 print(f"[telegram] 刷新成交统计失败 ({chat_id}): {exc}")
 
-    def refresh_fill_stats(self, chat_id, address, force_new=False):
+    def refresh_fill_stats(self, chat_id, address, force_new=False, target_message_id=None):
         self._publish_fill_stats(
             chat_id,
             address,
             None,
             selected_address=address,
             force_new=force_new,
+            target_message_id=target_message_id,
         )
 
     def _stats_fills(self, chat_id, address, window_min):
@@ -782,6 +1084,7 @@ class TelegramRouter:
                     int(fill.get("time") or 0),
                     str(fill.get("coin") or "?"),
                     str(fill.get("side") or "").upper(),
+                    str(fill.get("dir") or ""),
                     round(float(fill.get("sz") or 0), 8),
                     round(float(fill.get("px") or 0), 8),
                 )
@@ -826,6 +1129,7 @@ class TelegramRouter:
                     "time": timestamp,
                     "coin": str(fill.get("coin") or "?"),
                     "side": side,
+                    "dir": fill.get("dir"),
                     "sz": str(sz),
                     "px": str(px),
                 }
@@ -841,6 +1145,7 @@ class TelegramRouter:
         fills=None,
         selected_address=None,
         force_new=False,
+        target_message_id=None,
     ):
         try:
             window_min = int(
@@ -855,10 +1160,57 @@ class TelegramRouter:
         if window_min not in FILL_WINDOW_LABELS:
             window_min = 5
 
+        view = str(
+            self.store.get_chat_setting(
+                chat_id,
+                f"fill_stats_view:{address}",
+                "summary",
+            )
+        )
+        if view not in FILL_STATS_VIEW_LABELS:
+            view = "summary"
+
+        try:
+            page = int(
+                self.store.get_chat_setting(
+                    chat_id,
+                    f"fill_stats_page:{address}:{view}",
+                    "0",
+                )
+            )
+        except (TypeError, ValueError):
+            page = 0
+        page = max(0, page)
+
         if fills is None:
             fills = self._stats_fills(chat_id, address, window_min)
 
-        text = format_fill_stats_html(address, fills, window_min)
+        if view == "timeline":
+            text, page_count = format_fill_timeline_html(
+                address, fills, window_min, page=page
+            )
+        elif view == "interval":
+            text, page_count = format_fill_intervals_html(
+                address, fills, window_min, page=page
+            )
+        else:
+            text, page_count = format_fill_stats_html(
+                address, fills, window_min, page=page
+            )
+        if page >= page_count:
+            page = page_count - 1
+            if view == "timeline":
+                text, page_count = format_fill_timeline_html(
+                    address, fills, window_min, page=page
+                )
+            elif view == "interval":
+                text, page_count = format_fill_intervals_html(
+                    address, fills, window_min, page=page
+                )
+            else:
+                text, page_count = format_fill_stats_html(
+                    address, fills, window_min, page=page
+                )
         reply_markup = fill_stats_keyboard(
             address,
             window_min,
@@ -867,11 +1219,16 @@ class TelegramRouter:
                 active_only=False,
             ),
             selected_address=selected_address or address,
+            view=view,
+            page=page,
+            page_count=page_count,
         )
         key = "live_fill_stats_panel"
         message_id = self.store.get_chat_setting(chat_id, key, None)
         if force_new:
             message_id = None
+        if target_message_id is not None:
+            message_id = target_message_id
         if message_id is not None:
             try:
                 self.client.edit_message_text(
@@ -880,6 +1237,12 @@ class TelegramRouter:
                     text,
                     reply_markup=reply_markup,
                     parse_mode="HTML",
+                )
+                self.store.set_chat_setting(
+                    chat_id,
+                    key,
+                    str(message_id),
+                    int(time.time() * 1000),
                 )
                 return
             except Exception as exc:
@@ -1151,6 +1514,24 @@ class TelegramBot:
             )
             return
 
+        if data.startswith("fp:"):
+            self._handle_fill_page_callback(
+                callback_id,
+                chat_id,
+                message_id,
+                data,
+            )
+            return
+
+        if data.startswith("fv:"):
+            self._handle_fill_view_callback(
+                callback_id,
+                chat_id,
+                message_id,
+                data,
+            )
+            return
+
         if data.startswith("fs:"):
             self._handle_fill_stats_callback(
                 callback_id,
@@ -1219,11 +1600,27 @@ class TelegramBot:
             self.client.answer_callback_query(callback_id)
             return
 
+        now_ms = int(time.time() * 1000)
         self.store.set_chat_setting(
             chat_id,
             f"fill_stats_window:{address}",
             str(window_min),
-            int(time.time() * 1000),
+            now_ms,
+        )
+        view = str(
+            self.store.get_chat_setting(
+                chat_id,
+                f"fill_stats_view:{address}",
+                "summary",
+            )
+        )
+        if view not in FILL_STATS_VIEW_LABELS:
+            view = "summary"
+        self.store.set_chat_setting(
+            chat_id,
+            f"fill_stats_page:{address}:{view}",
+            "0",
+            now_ms,
         )
         try:
             self.router.refresh_fill_stats(chat_id, address)
@@ -1232,6 +1629,63 @@ class TelegramBot:
             self.client.answer_callback_query(callback_id, "切换失败，请重试。")
             return
         self.client.answer_callback_query(callback_id, f"已切换为{FILL_WINDOW_LABELS[window_min]}窗口。")
+
+    def _handle_fill_page_callback(self, callback_id, chat_id, message_id, data):
+        try:
+            _, address, view, page_text = data.split(":", 3)
+            address = normalize_address(address)
+            page = int(page_text)
+        except (ValueError, TypeError):
+            self.client.answer_callback_query(callback_id)
+            return
+        if view not in FILL_STATS_VIEW_LABELS or page < 0:
+            self.client.answer_callback_query(callback_id)
+            return
+        self.store.set_chat_setting(
+            chat_id,
+            f"fill_stats_page:{address}:{view}",
+            str(page),
+            int(time.time() * 1000),
+        )
+        try:
+            self.router.refresh_fill_stats(chat_id, address)
+        except Exception as exc:
+            print(f"[telegram] 切换成交统计翻页失败: {exc}")
+            self.client.answer_callback_query(callback_id, "切换失败，请重试。")
+            return
+        self.client.answer_callback_query(callback_id)
+
+    def _handle_fill_view_callback(self, callback_id, chat_id, message_id, data):
+        try:
+            _, address, view = data.split(":", 2)
+            address = normalize_address(address)
+        except (ValueError, TypeError):
+            self.client.answer_callback_query(callback_id, "无效的按钮数据。")
+            return
+        if view not in FILL_STATS_VIEW_LABELS:
+            self.client.answer_callback_query(callback_id, "无效的视图。")
+            return
+        now_ms = int(time.time() * 1000)
+        self.store.set_chat_setting(
+            chat_id,
+            f"fill_stats_view:{address}",
+            view,
+            now_ms,
+        )
+        self.store.set_chat_setting(
+            chat_id,
+            f"fill_stats_page:{address}:{view}",
+            "0",
+            now_ms,
+        )
+        try:
+            self.router.refresh_fill_stats(chat_id, address)
+        except Exception as exc:
+            print(f"[telegram] 切换成交统计视图失败: {exc}")
+            self.client.answer_callback_query(callback_id, "切换失败，请重试。")
+            return
+        label = FILL_STATS_VIEW_LABELS[view]
+        self.client.answer_callback_query(callback_id, f"已切换为{label}视图。")
 
     def _handle_brief_address_callback(self, callback_id, chat_id, message_id, data):
         try:
@@ -1274,11 +1728,27 @@ class TelegramBot:
             self.client.answer_callback_query(callback_id)
             return
 
+        now_ms = int(time.time() * 1000)
         self.store.set_chat_setting(
             chat_id,
             "selected_fill_stats_address",
             address,
-            int(time.time() * 1000),
+            now_ms,
+        )
+        view = str(
+            self.store.get_chat_setting(
+                chat_id,
+                f"fill_stats_view:{address}",
+                "summary",
+            )
+        )
+        if view not in FILL_STATS_VIEW_LABELS:
+            view = "summary"
+        self.store.set_chat_setting(
+            chat_id,
+            f"fill_stats_page:{address}:{view}",
+            "0",
+            now_ms,
         )
         try:
             self.router.refresh_fill_stats(chat_id, address)
@@ -1607,13 +2077,24 @@ class TelegramBot:
             address,
             int(time.time() * 1000),
         )
+        placeholder_id = self._send_loading(chat_id, "⏳ 正在获取成交统计…")
         try:
-            self.router.refresh_fill_stats(chat_id, address, force_new=True)
-        except Exception as exc:
-            self.client.send_message(
+            self.router.refresh_fill_stats(
                 chat_id,
-                f"打开成交统计失败: {exc}",
+                address,
+                force_new=True,
+                target_message_id=placeholder_id,
             )
+        except Exception as exc:
+            error_text = f"打开成交统计失败: {exc}"
+            if placeholder_id is not None:
+                self.client.edit_message_text(
+                    chat_id,
+                    placeholder_id,
+                    error_text,
+                )
+            else:
+                self.client.send_message(chat_id, error_text)
 
     def _cmd_history(self, chat_id, args):
         subscriptions = self.store.get_subscriptions(
@@ -1637,15 +2118,29 @@ class TelegramBot:
             self.client.send_message(chat_id, "当前没有监控地址，请用 /add 添加。")
             return
 
+        placeholder_id = self._send_loading(chat_id, "⏳ 正在整理持仓历史…")
         try:
             report = self.monitor.history_report(address)
         except Exception as exc:
-            self.client.send_message(
-                chat_id,
-                f"查询持仓历史失败: {exc}",
-            )
+            error_text = f"查询持仓历史失败: {exc}"
+            if placeholder_id is not None:
+                self.client.edit_message_text(
+                    chat_id,
+                    placeholder_id,
+                    error_text,
+                )
+            else:
+                self.client.send_message(chat_id, error_text)
             return
-        self.client.send_message(chat_id, report, parse_mode="HTML")
+        if placeholder_id is not None:
+            self.client.edit_message_text(
+                chat_id,
+                placeholder_id,
+                report,
+                parse_mode="HTML",
+            )
+        else:
+            self.client.send_message(chat_id, report, parse_mode="HTML")
 
     def _cmd_tpsl(self, chat_id, args):
         subscriptions = self.store.get_subscriptions(
@@ -1671,6 +2166,7 @@ class TelegramBot:
         self._send_tpsl(chat_id, address)
 
     def _send_tpsl(self, chat_id, address):
+        self.client.send_typing(chat_id)
         try:
             report = self.monitor.tpsl_report(address)
         except Exception as exc:
@@ -1738,6 +2234,7 @@ class TelegramBot:
             if not address:
                 self.client.send_message(chat_id, "找不到该地址或命名。")
                 return
+            self.client.send_typing(chat_id)
             self._show_orders_coin_menu(chat_id, address)
             return
         if not subscriptions:
@@ -2076,7 +2573,17 @@ class TelegramBot:
         self._show_orders_account_menu(chat_id, target_message_id=message_id)
         self.client.answer_callback_query(callback_id)
 
+    def _send_loading(self, chat_id, text="⏳ 正在获取数据，请稍候…"):
+        try:
+            result = self.client.send_message(chat_id, text)
+            self.client.send_typing(chat_id)
+            return (result or {}).get("message_id")
+        except Exception as exc:
+            print(f"[telegram] 发送加载提示失败 ({chat_id}): {exc}")
+            return None
+
     def _send_status(self, chat_id, address, sort_mode="value"):
+        placeholder_id = self._send_loading(chat_id, "⏳ 正在获取账户数据…")
         try:
             data = self.monitor.snapshot_data(address)
             self.store.set_chat_setting(
@@ -2098,12 +2605,18 @@ class TelegramBot:
                 sort_mode,
                 force_new=True,
                 selected_address=address,
+                target_message_id=placeholder_id,
             )
         except Exception as exc:
-            self.client.send_message(
-                chat_id,
-                f"查询 {short_addr(address)} 失败: {exc}",
-            )
+            error_text = f"查询 {short_addr(address)} 失败: {exc}"
+            if placeholder_id is not None:
+                self.client.edit_message_text(
+                    chat_id,
+                    placeholder_id,
+                    error_text,
+                )
+            else:
+                self.client.send_message(chat_id, error_text)
 
     def _cmd_sort(self, chat_id, args):
         value = args.strip().lower()
