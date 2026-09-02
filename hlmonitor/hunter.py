@@ -302,6 +302,41 @@ def _max_drawdown(values):
     return max_dd_usd, max_dd_pct
 
 
+_leverage_cache: dict[str, tuple[float, float | None]] = {}
+_LEVERAGE_CACHE_TTL = 900.0
+
+
+def _avg_leverage(api, address):
+    """拉持仓快照算平均杠杠：总名义仓位 ÷ 账户净值。"""
+    key = str(address).lower()
+    now = time.time()
+    with _cache_lock:
+        cached = _leverage_cache.get(key)
+        if cached and now - cached[0] < _LEVERAGE_CACHE_TTL:
+            return cached[1]
+    state = None
+    for attempt in range(3):
+        try:
+            state = api.clearinghouse_state(address)
+            break
+        except Exception as exc:
+            if attempt >= 2:
+                print(f"[hunter] 持仓拉取失败 ({short_addr(address)}): {exc}")
+            else:
+                time.sleep(1.0 * (attempt + 1))
+    value = None
+    if state is not None:
+        ms = state.get("marginSummary") or {}
+        equity = _num(ms.get("accountValue"))
+        ntl = _num(ms.get("totalNtlPos"))
+        if equity > 0:
+            value = ntl / equity
+    if value is not None:
+        with _cache_lock:
+            _leverage_cache[key] = (now, value)
+    return value
+
+
 def attach_charts(api, results, progress=None):
     """给最终结果附上盈利走势与最大回撤数据。"""
     for index, item in enumerate(results, 1):
@@ -309,6 +344,7 @@ def attach_charts(api, results, progress=None):
             progress(index, len(results), item.get("address", ""))
         pnl_history = fetch_pnl_history(api, item.get("address", ""))
         item["pnl_history"] = pnl_history
+        item["avg_leverage"] = _avg_leverage(api, item.get("address", ""))
         time.sleep(0.4)
         if pnl_history:
             values = [v for _, v in pnl_history]
@@ -327,12 +363,10 @@ def attach_charts(api, results, progress=None):
     return results
 
 
-def format_account_card_html(account, index, total, spark_width=32):
-    """单账户卡片：顶部盈利走势图（引用框），中间指标，底部可复制地址。"""
+def format_account_card_html(account, index, total, spark_width=32, table_style="bordered compact"):
+    """单账户卡片：标题 + 走势图 + 对齐指标表 + 双引号等宽地址。"""
     address = str(account.get("address", ""))
     alias = str(account.get("alias") or "")
-    pf = account.get("profit_factor")
-    pf_text = "∞" if pf == float("inf") else f"{pf:.2f}"
     header = f"<b>{index}/{total}"
     if alias:
         header += f" · {html.escape(alias)}"
@@ -340,40 +374,34 @@ def format_account_card_html(account, index, total, spark_width=32):
     lines = [header]
 
     history = account.get("pnl_history") or []
-    body = []
     if history:
         values = [v for _, v in history]
         spark = _sparkline(values, width=spark_width)
         if spark:
             lines.append(spark)
-        body.append(
-            f"最低 {_fmt_pnl(account.get('pnl_min', min(values)))} · "
-            f"最高 {_fmt_pnl(account.get('pnl_max', max(values)))} · "
-            f"当前 {_fmt_pnl(account.get('pnl_current', values[-1]))}"
-        )
-    drawdown_usd = account.get("max_drawdown_usd")
-    drawdown_pct = account.get("max_drawdown_pct")
-    if drawdown_pct is not None:
-        body.append(
-            f"最大回撤: {drawdown_pct:.2f}% · {_fmt_pnl(-(drawdown_usd or 0))}"
-        )
-    body.extend(
-        [
-            f"净值: {fmt_usd_cn(account.get('account_value', 0))} · "
-            f"全时段成交: {fmt_usd_cn(account.get('volume', 0))}",
-            f"盈亏: {_fmt_pnl(account.get('pnl'))} · "
-            f"ROI: {account.get('roi', 0) * 100:.2f}%",
-            f"胜率: {account.get('win_rate', 0) * 100:.1f}% · "
-            f"加权胜率: {account.get('weighted_win_rate', 0) * 100:.1f}% · "
-            f"盈亏因子: {pf_text}",
-            f"样本: {account.get('sample_size', 0)} 笔平仓 · "
-            f"评分: {account.get('score', 0):.3f}",
-        ]
+
+    equity = fmt_usd_cn(account.get("account_value", 0))
+    lev = account.get("avg_leverage")
+    lev_text = f"{lev:.1f}x" if lev is not None else "-"
+    wwr = _num(account.get("weighted_win_rate"))
+    sample = int(account.get("sample_size", 0) or 0)
+    dd_pct = account.get("max_drawdown_pct")
+    dd_text = f"{dd_pct:.1f}%" if dd_pct is not None else "-"
+    score = account.get("score")
+    score_text = f"{round(_num(score) * 100)}/100" if score is not None else "-"
+
+    attrs = f" {table_style}" if table_style else ""
+    mark = "<mark>"
+    table = (
+        f"<table{attrs}>"
+        f"<tr><td>净值</td><td><b>{html.escape(equity)}</b></td>"
+        f"<td>平均杠杠</td><td>{html.escape(lev_text)}</td></tr>"
+        f"<tr><td>加权胜率</td><td>{wwr * 100:.1f}%</td>"
+        f"<td>样本</td><td>{sample} 笔</td></tr>"
+        f"<tr><td>{mark}最大回撤</mark></td><td>{mark}{html.escape(dd_text)}</mark></td>"
+        f"<td>{mark}评分</mark></td><td>{mark}{html.escape(score_text)}</mark></td></tr>"
+        f"</table>"
     )
-    lines.append(
-        f"<blockquote>{html.escape(chr(10).join(body))}</blockquote>"
-    )
-    lines.append(
-        f"<blockquote><code>{html.escape(address)}</code></blockquote>"
-    )
+    lines.append(table)
+    lines.append(f'"<code>{html.escape(address)}</code>"')
     return "\n".join(lines)
