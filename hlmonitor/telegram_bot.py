@@ -1512,6 +1512,15 @@ class TelegramBot:
             )
             return
 
+        if data.startswith("ht:"):
+            self._handle_hunt_style_callback(
+                callback_id,
+                chat_id,
+                message_id,
+                data,
+            )
+            return
+
         if data.startswith("asb:"):
             self._handle_brief_address_callback(
                 callback_id,
@@ -1908,6 +1917,38 @@ class TelegramBot:
                 )
             except Exception as exc:
                 print(f"[telegram] 更新订阅状态失败: {exc}")
+
+    def _handle_hunt_style_callback(self, callback_id, chat_id, message_id, data):
+        try:
+            page = int(data.split(":", 1)[1])
+        except (ValueError, IndexError):
+            self.client.answer_callback_query(callback_id)
+            return
+        current = str(
+            self.store.get_chat_setting(chat_id, "hunt_spark_width", "long")
+        )
+        new_mode = "short" if current == "long" else "long"
+        self.store.set_chat_setting(
+            chat_id,
+            "hunt_spark_width",
+            new_mode,
+            int(time.time() * 1000),
+        )
+        results = self._load_hunt_session(chat_id)
+        rendered = self._hunt_page(chat_id, results, page)
+        if rendered is not None:
+            text, keyboard = rendered
+            try:
+                self.client.edit_message_text(
+                    chat_id,
+                    message_id,
+                    text,
+                    reply_markup=keyboard,
+                    parse_mode="HTML",
+                )
+            except Exception as exc:
+                print(f"[telegram] 切换走势样式失败: {exc}")
+        self.client.answer_callback_query(callback_id)
 
     def _handle_brief_page_callback(self, callback_id, chat_id, message_id, data):
         try:
@@ -2464,7 +2505,7 @@ class TelegramBot:
             str(sub["address"]).lower() == address for sub in subscriptions
         )
 
-    def _hunt_card_keyboard(self, page, total, subscribed):
+    def _hunt_card_keyboard(self, page, total, subscribed, spark_long=True):
         nav = []
         if page > 0:
             nav.append(
@@ -2480,7 +2521,8 @@ class TelegramBot:
             nav.append(
                 {"text": "下一页 ▶️", "callback_data": f"hp:{page + 1}"}
             )
-        return {"inline_keyboard": [nav]}
+        toggle_text = "📉 紧凑走势" if spark_long else "📈 完整走势"
+        return {"inline_keyboard": [nav, [{"text": toggle_text, "callback_data": f"ht:{page}"}]]}
 
     def _hunt_page(self, chat_id, results, page):
         if page < 0 or page >= len(results):
@@ -2496,11 +2538,22 @@ class TelegramBot:
         }
         key = str(account.get("address", "")).lower()
         account["alias"] = sub_map.get(key) or account.get("alias") or ""
-        text = format_account_card_html(account, page + 1, len(results))
+        spark_long = (
+            str(self.store.get_chat_setting(chat_id, "hunt_spark_width", "long"))
+            != "short"
+        )
+        spark_width = 32 if spark_long else 18
+        text = format_account_card_html(
+            account,
+            page + 1,
+            len(results),
+            spark_width=spark_width,
+        )
         keyboard = self._hunt_card_keyboard(
             page,
             len(results),
             key in sub_map,
+            spark_long=spark_long,
         )
         return text, keyboard
 

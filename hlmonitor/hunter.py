@@ -327,7 +327,7 @@ def attach_charts(api, results, progress=None):
     return results
 
 
-def format_account_card_html(account, index, total):
+def format_account_card_html(account, index, total, spark_width=32):
     """单账户卡片：顶部盈利走势图（引用框），中间指标，底部可复制地址。"""
     address = str(account.get("address", ""))
     alias = str(account.get("alias") or "")
@@ -343,7 +343,7 @@ def format_account_card_html(account, index, total):
     body = []
     if history:
         values = [v for _, v in history]
-        spark = _sparkline(values, width=32)
+        spark = _sparkline(values, width=spark_width)
         if spark:
             lines.append(spark)
         body.append(
