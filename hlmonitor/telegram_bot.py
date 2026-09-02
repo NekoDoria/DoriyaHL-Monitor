@@ -602,9 +602,9 @@ def format_fill_intervals_html(
                 side_index[side] = len(side_groups)
                 side_groups.append((side, []))
             side_groups[side_index[side]][1].append(cluster)
-        side_blocks = []
-        for side, cluster_list in side_groups:
-            block_lines = []
+        tables = []
+        used = 0
+        for _side, cluster_list in side_groups:
             for cluster in cluster_list:
                 stat = _cluster_interval_stats(cluster)
                 dir_text = " · ".join(
@@ -613,34 +613,31 @@ def format_fill_intervals_html(
                 head = f"{stat['side']} · {stat['count']}笔"
                 if dir_text:
                     head += f"（{dir_text}）"
-                range_line = (
-                    f"价格: {fmt_qty(stat['min_px'])}"
-                    if stat["min_px"] == stat["max_px"]
-                    else f"区间: {fmt_qty(stat['min_px'])} – {fmt_qty(stat['max_px'])}"
+                single = stat["min_px"] == stat["max_px"]
+                range_label = "价格" if single else "区间"
+                range_value = (
+                    fmt_qty(stat["min_px"])
+                    if single
+                    else f"{fmt_qty(stat['min_px'])} – {fmt_qty(stat['max_px'])}"
                 )
-                block_lines.extend(
-                    [
-                        head,
-                        range_line,
-                        f"均价: {fmt_qty(stat['avg_px'])} · 数量: {fmt_szi(stat['total_sz'])} · {fmt_usd_cn(stat['total_value'])}",
-                        f"时间: {fmt_time_min(stat['first_time'])} – {fmt_time_min(stat['last_time'])}",
-                        "",
-                    ]
+                rows = (
+                    f"<tr><td>方向</td><td>{html.escape(head)}</td>"
+                    f"<td>{range_label}</td><td>{html.escape(range_value)}</td></tr>"
+                    f"<tr><td>均价</td><td>{fmt_qty(stat['avg_px'])}</td>"
+                    f"<td>数量</td><td>{html.escape(fmt_szi(stat['total_sz']))}</td></tr>"
+                    f"<tr><td>金额</td><td>{html.escape(fmt_usd_cn(stat['total_value']))}</td>"
+                    f"<td>时间</td><td>{html.escape(f'{fmt_time_min(stat["first_time"])} – {fmt_time_min(stat["last_time"])}')}</td></tr>"
                 )
-                if len("\n".join(block_lines)) > 1400:
-                    block_lines.append("... 本方向其余区间省略")
+                table = f"<table bordered compact>{rows}</table>"
+                if used + len(table) > max_page_len - 300:
+                    tables.append("…… 其余区间省略")
                     break
-            if block_lines and block_lines[-1] == "":
-                block_lines.pop()
-            if not block_lines:
-                continue
-            side_blocks.append(
-                "<blockquote expandable>"
-                + "\n".join(html.escape(line) for line in block_lines)
-                + "</blockquote>"
-            )
-        if side_blocks:
-            blocks.append((coin, side_blocks))
+                tables.append(table)
+                used += len(table)
+            if tables and tables[-1].startswith("…"):
+                break
+        if tables:
+            blocks.append((coin, tables))
 
     pages = []
     current = []
@@ -663,12 +660,18 @@ def format_fill_intervals_html(
 
     total_pages = max(1, len(pages))
     page = max(0, min(page, total_pages - 1))
-    body = list(lines)
+    head_text = "\n".join(lines)
+    chunks = []
     for coin, side_blocks in pages[page]:
-        body.append("")
-        body.append(f"<b>{html.escape(coin)}</b>")
-        body.extend(side_blocks)
-    return "\n".join(body), total_pages
+        if side_blocks:
+            chunks.append(
+                f"<b>{html.escape(coin)}</b>{''.join(side_blocks)}"
+            )
+        else:
+            chunks.append(f"<b>{html.escape(coin)}</b>")
+    if not chunks:
+        return head_text, total_pages
+    return head_text + "\n\n" + "".join(chunks), total_pages
 
 
 

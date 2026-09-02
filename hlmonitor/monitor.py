@@ -870,10 +870,12 @@ class AddressMonitor:
         closed_positions = []
         for coin, prev in previous.items():
             if coin not in current:
+                prev_szi = _num(prev.get("szi"))
+                side_cn = "多" if prev_szi > 0 else ("空" if prev_szi < 0 else "")
                 closed_positions.append(
                     (
                         coin,
-                        f"平仓 {fmt_usd_cn(abs(_num(prev.get('notional'))))}",
+                        f"平{side_cn}仓 {fmt_usd_cn(abs(_num(prev.get('notional'))))}",
                     )
                 )
 

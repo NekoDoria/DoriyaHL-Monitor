@@ -151,7 +151,7 @@ def format_position_brief(
             if _num(balance.get("total")) != 0
         ]
         lines.append("")
-        lines.append(f"现货非零余额币种: {len(nonzero_spot)}")
+        lines.append(f"现货: {len(nonzero_spot)}")
         for coin, balance in nonzero_spot[:spot_limit]:
             lines.append(
                 f"  {coin}: {fmt_qty(balance.get('total'))}"
@@ -230,23 +230,30 @@ def format_position_brief_html(
                 title_line += f" {lev}"
             peak = _num(pos.get("peak_notional") or notional)
             peak_ratio = notional / peak if peak else 0
-            lines = []
+            rows = []
             if coin in changes:
-                lines.append(html.escape(f"变动: {changes[coin]}"))
-            lines.extend(
-                [
-                    html.escape(f"浮动盈亏: {_fmt_pnl(pos.get('unrealized_pnl'))}"),
-                    html.escape(f"持仓: {fmt_usd_cn(notional)}"),
-                    html.escape(
-                        f"峰值进度: {_progress_bar(peak_ratio)} {peak_ratio * 100:.1f}% · 峰值 {fmt_usd_cn(peak)}"
-                    ),
-                    html.escape(f"入场价: {entry}"),
-                    html.escape(f"开仓时间: {open_label}"),
-                ]
+                rows.append(
+                    f"<tr><td colspan=\"4\">变动: {html.escape(changes[coin])}</td></tr>"
+                )
+            for label_l, value_l, label_r, value_r in (
+                (
+                    "持仓",
+                    fmt_usd_cn(notional),
+                    "浮动盈亏",
+                    _fmt_pnl(pos.get("unrealized_pnl")),
+                ),
+                ("入场价", entry, "开仓时间", open_label),
+            ):
+                rows.append(
+                    f"<tr><td>{html.escape(label_l)}</td><td>{html.escape(value_l)}</td>"
+                    f"<td>{html.escape(label_r)}</td><td>{html.escape(value_r)}</td></tr>"
+                )
+            rows.append(
+                f"<tr><td>峰值</td>"
+                f"<td colspan=\"3\">{html.escape(f'{_progress_bar(peak_ratio)} {peak_ratio * 100:.1f}% · {fmt_usd_cn(peak)}')}</td></tr>"
             )
-            body = "\n".join(lines)
             blocks.append(
-                f"{title_line}\n<blockquote expandable>{body}</blockquote>"
+                f"{title_line}<table bordered compact>{''.join(rows)}</table>"
             )
     else:
         blocks.append("<blockquote>当前无合约持仓</blockquote>")
@@ -269,7 +276,7 @@ def format_position_brief_html(
             )
             if _num(balance.get("total")) != 0
         ]
-        spot_lines = [f"现货非零余额币种: {len(nonzero_spot)}"]
+        spot_lines = [f"现货: {len(nonzero_spot)}"]
         for coin, balance in nonzero_spot[:spot_limit]:
             spot_lines.append(
                 f"{coin}: {fmt_qty(balance.get('total'))}"
@@ -281,7 +288,9 @@ def format_position_brief_html(
             f"<blockquote expandable>{html.escape(chr(10).join(spot_lines))}</blockquote>"
         )
 
-    return "\n\n".join(blocks)
+    if len(blocks) == 1:
+        return blocks[0]
+    return blocks[0] + "\n\n" + "".join(blocks[1:])
 
 
 def format_position_brief_html_data(data, sort_mode="value", page=0, page_size=BRIEF_PAGE_SIZE):
@@ -633,15 +642,9 @@ def format_open_orders_intervals_html(
             f"粒度: {level} · 按各币种波动自适应合并 · 止盈止损另列"
         )
 
-    blocks = [
-        "\n".join(
-            [
-                title,
-                source_line,
-            ]
-        )
-    ]
-    used = len(blocks[0])
+    head_text = "\n".join([title, source_line])
+    blocks = [head_text]
+    used = len(head_text)
     shown = 0
     total = 0
     last_coin = None
@@ -681,51 +684,50 @@ def format_open_orders_intervals_html(
                 min_orders=ladder_min_orders,
                 max_cv=ladder_max_cv,
             )
-            range_line = (
-                f"价格: {fmt_qty(stats['min_px'])}"
-                if stats["min_px"] == stats["max_px"]
-                else (
-                    f"区间: {fmt_qty(stats['min_px'])} – "
-                    f"{fmt_qty(stats['max_px'])}"
-                )
+            single = stats["min_px"] == stats["max_px"]
+            range_label = "价格" if single else "区间"
+            range_value = (
+                fmt_qty(stats["min_px"])
+                if single
+                else f"{fmt_qty(stats['min_px'])} – {fmt_qty(stats['max_px'])}"
             )
-            body = [
-                (
-                    f"{stats['side']}网格 · {stats['count']} 笔"
-                    if ladder
-                    else f"{stats['side']} · {stats['count']} 笔"
-                ),
-                range_line,
-                f"均价: {fmt_qty(stats['avg_px'])}",
-                f"数量: {fmt_qty(stats['total_sz'])}",
-                f"金额: ≈{fmt_usd_cn(stats['total_value'])}",
-            ]
-            entry_block = (
-                "<blockquote expandable>"
-                + "\n".join(html.escape(line) for line in body)
-                + "</blockquote>"
+            head = (
+                f"{stats['side']}网格 · {stats['count']} 笔"
+                if ladder
+                else f"{stats['side']} · {stats['count']} 笔"
             )
-            add_cost = len(entry_block) + 2
-            if coin is None and group_coin != last_coin:
-                display = _spot_coin_label(group_coin, spot_names)
-                add_cost += len(f"<b>{html.escape(display)}</b>") + 2
-            if used + add_cost > max_chars:
-                exceeded = True
-                break
+            rows = (
+                f"<tr><td colspan=\"4\">{html.escape(head)}</td></tr>"
+                f"<tr><td>{range_label}</td><td>{html.escape(range_value)}</td>"
+                f"<td>均价</td><td>{fmt_qty(stats['avg_px'])}</td></tr>"
+                f"<tr><td>数量</td><td>{html.escape(fmt_qty(stats['total_sz']))}</td>"
+                f"<td>金额</td><td>≈{html.escape(fmt_usd_cn(stats['total_value']))}</td></tr>"
+            )
+            entry_block = f"<table bordered compact>{rows}</table>"
+            coin_header = None
             if coin is None and group_coin != last_coin:
                 display = _spot_coin_label(group_coin, spot_names)
                 coin_header = f"<b>{html.escape(display)}</b>"
-                blocks.append(coin_header)
-                used += len(coin_header) + 2
+            add_cost = len(entry_block) + 2
+            if coin_header is not None:
+                add_cost += len(coin_header) + 2
+            if used + add_cost > max_chars:
+                exceeded = True
+                break
+            if coin_header is not None:
+                blocks.append(coin_header + entry_block)
+                used += len(coin_header) + 2 + len(entry_block) + 2
                 last_coin = group_coin
-            blocks.append(entry_block)
-            used += len(entry_block) + 2
+            else:
+                blocks.append(entry_block)
+                used += len(entry_block) + 2
             shown += 1
         if exceeded:
             break
 
     if not shown:
-        blocks.append("<blockquote>当前没有普通挂单</blockquote>")
-    elif total > shown:
-        blocks.append(f"…… 其余 {total - shown} 个区间未显示")
-    return "\n\n".join(blocks)
+        return head_text + "<blockquote>当前没有普通挂单</blockquote>"
+    body = "".join(blocks[1:])
+    if total > shown:
+        body += f"…… 其余 {total - shown} 个区间未显示"
+    return head_text + "\n\n" + body
