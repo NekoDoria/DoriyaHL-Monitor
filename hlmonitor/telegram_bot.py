@@ -3967,9 +3967,19 @@ class TelegramBot:
             return
 
         if mode in {"on", "off", "now", "del", "run"}:
-            name = rest.split()[0].lower() if rest else ""
-            if name not in names:
-                self.client.send_message(chat_id, f"找不到进程 {name}，先 /autohunt list 查看。")
+            if rest:
+                name = rest.split()[0].lower()
+            elif len(names) == 1:
+                name = names[0]
+            else:
+                name = ""
+            if not name or name not in names:
+                if not names:
+                    self.client.send_message(chat_id, "还没有进程，先 /autohunt new 名称。")
+                elif name:
+                    self.client.send_message(chat_id, f"找不到进程 {name}，先 /autohunt list 查看。")
+                else:
+                    self.client.send_message(chat_id, "有多个进程，请指定名称，例如 /autohunt now 名称。")
                 return
             now_ms = int(time.time() * 1000)
             key = self._auto_key
@@ -3998,7 +4008,7 @@ class TelegramBot:
             "用法：\n"
             "/autohunt new 名称 - 新建一个自动猎手进程\n"
             "/autohunt list - 查看所有进程\n"
-            "/autohunt on|off|now|del 名称 - 启动/停止/立即跑/删除\n"
+            "/autohunt on|off|now|del [名称] - 启动/停止/立即跑/删除（只有一个时可省略名称）\n"
             "查看挂单区：/zones 进程名 [标的]",
         )
 
