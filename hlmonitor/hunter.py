@@ -224,7 +224,7 @@ def _fill_win_stats(fills):
     }
 
 
-def scan(config, api, progress=None, coins=None, swing_mode=None, max_results=None):
+def scan(config, api, progress=None, coins=None, swing_mode=None, max_results=None, exclude=None, scanned_out=None):
     """粗筛排行榜 -> 精算胜率 -> 过滤 -> 按综合评分排序，返回收集列表。"""
     hunter = config.hunter
     rows = fetch_leaderboard(config.network, config.proxy_url)
@@ -259,8 +259,15 @@ def scan(config, api, progress=None, coins=None, swing_mode=None, max_results=No
     # filters is eligible, and we sample a batch so the final ranking is decided
     # by the weighted win rate computed from real fills, not by net worth.
     sample_count = max(int(hunter.candidates), 1)
+    excluded = {str(addr).lower() for addr in (exclude or [])}
+    if excluded:
+        fresh = [c for c in candidates if c["address"] not in excluded]
+        if fresh:
+            candidates = fresh
     if len(candidates) > sample_count:
         candidates = random.sample(candidates, sample_count)
+    if scanned_out is not None:
+        scanned_out.extend(c["address"] for c in candidates)
 
     results = []
     for index, cand in enumerate(candidates, 1):

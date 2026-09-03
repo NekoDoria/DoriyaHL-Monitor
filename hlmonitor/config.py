@@ -82,6 +82,7 @@ class HunterConfig:
     swing_min_position_usd: float = 50_000.0
     swing_min_move_pct: float = 1.5
     swing_min_funding_pct: float = 0.1
+    auto_skip_hours: float = 12.0              # autohunt 跳过最近多少小时内已扫过的地址
     candidates: int = 150                  # 从合格账户中随机抽取精算的数量（不再按净值取前 N）
     top_n: int = 10                        # 最终收集数量
 
@@ -223,7 +224,20 @@ def load_config(path: str | os.PathLike | None = None) -> Config:
             1.0,
             max(0.0, _as_float(hunter_data.get("min_win_rate", 0.50), 0.50)),
         ),
-        candidates=max(1, _as_int(hunter_data.get("candidates", 40), 40)),
+        swing_mode=_as_bool(hunter_data.get("swing_mode", False), False),
+        swing_min_position_usd=max(
+            0.0, _as_float(hunter_data.get("swing_min_position_usd", 50_000.0), 50_000.0)
+        ),
+        swing_min_move_pct=max(
+            0.0, _as_float(hunter_data.get("swing_min_move_pct", 1.5), 1.5)
+        ),
+        swing_min_funding_pct=max(
+            0.0, _as_float(hunter_data.get("swing_min_funding_pct", 0.1), 0.1)
+        ),
+        auto_skip_hours=max(
+            0.5, _as_float(hunter_data.get("auto_skip_hours", 12.0), 12.0)
+        ),
+        candidates=max(1, _as_int(hunter_data.get("candidates", 150), 150)),
         top_n=max(1, _as_int(hunter_data.get("top_n", 10), 10)),
     )
 

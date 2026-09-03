@@ -4077,21 +4077,30 @@ class TelegramBot:
         cfg = self._auto_config(chat_id, name)
         if not cfg or not cfg["configured"]:
             return
+        now_ms = int(time.time() * 1000)
+        skip_hours = float(getattr(self.config.hunter, "auto_skip_hours", 12.0))
+        since_ms = int(now_ms - max(skip_hours, 0.5) * 3600000)
+        seen = self.store.recent_auto_scanned(chat_id, name, since_ms)
+        scanned_out = []
         results = scan(
             self.config,
             self.monitor.api,
             coins=cfg["coins"],
             max_results=cfg["limit"],
+            exclude=seen,
+            scanned_out=scanned_out,
         )
-        now_ms = int(time.time() * 1000)
+        if scanned_out:
+            self.store.record_auto_scanned(chat_id, name, scanned_out, ts=now_ms)
+        self.store.purge_auto_scanned(chat_id, name, since_ms)
         for item in results:
             self.store.upsert_auto_account(chat_id, name, item, ts=now_ms)
         total = len(self.store.get_auto_accounts(chat_id, name))
         scope = "、".join(cfg["coins"]) if cfg["coins"] else "综合"
         self.client.send_message(
             chat_id,
-            f"进程 {name} 本轮完成：新收录 {len(results)} 个账户（{scope}），"
-            f"该进程自动列表共 {total} 个。\n用 /zones {name} 查看挂单密集区。",
+            f"进程 {name} 本轮完成：实际精算 {len(scanned_out)} 个（跳过近期已扫 {len(seen)} 个），"
+            f"新收录 {len(results)} 个账户（{scope}），自动列表共 {total} 个。\n用 /zones {name} 查看挂单密集区。",
         )
 
     # ---------- auto account order zones ----------

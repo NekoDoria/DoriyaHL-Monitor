@@ -94,6 +94,13 @@ CREATE TABLE IF NOT EXISTS auto_process_accounts (
     scanned_at    INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (chat_id, proc, address)
 );
+CREATE TABLE IF NOT EXISTS auto_scanned (
+    chat_id     TEXT NOT NULL,
+    proc        TEXT NOT NULL,
+    address     TEXT NOT NULL,
+    scanned_at  INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (chat_id, proc, address)
+);
 CREATE INDEX IF NOT EXISTS idx_events_ts ON events(ts);
 CREATE INDEX IF NOT EXISTS idx_snapshots_addr_ts ON snapshots(address, ts);
 """
@@ -328,6 +335,39 @@ class EventStore:
             self.conn.execute(
                 "DELETE FROM auto_process_accounts WHERE chat_id = ? AND proc = ?",
                 (str(chat_id), str(proc or "default")),
+            )
+            self.conn.commit()
+
+    def record_auto_scanned(self, chat_id, proc, addresses, ts=None):
+        if not addresses:
+            return
+        ts = int(ts or 0)
+        with self._lock:
+            self.conn.executemany(
+                "INSERT OR REPLACE INTO auto_scanned("
+                " chat_id, proc, address, scanned_at) VALUES (?,?,?,?)",
+                [
+                    (str(chat_id), str(proc or "default"), str(addr).lower(), ts)
+                    for addr in addresses
+                ],
+            )
+            self.conn.commit()
+
+    def recent_auto_scanned(self, chat_id, proc, since_ms):
+        with self._lock:
+            rows = self.conn.execute(
+                "SELECT address FROM auto_scanned"
+                " WHERE chat_id = ? AND proc = ? AND scanned_at >= ?",
+                (str(chat_id), str(proc or "default"), int(since_ms)),
+            ).fetchall()
+        return {str(row[0]) for row in rows}
+
+    def purge_auto_scanned(self, chat_id, proc, before_ms):
+        with self._lock:
+            self.conn.execute(
+                "DELETE FROM auto_scanned"
+                " WHERE chat_id = ? AND proc = ? AND scanned_at < ?",
+                (str(chat_id), str(proc or "default"), int(before_ms)),
             )
             self.conn.commit()
 
