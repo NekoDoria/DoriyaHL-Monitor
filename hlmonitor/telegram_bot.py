@@ -1734,6 +1734,14 @@ class TelegramBot:
             self.client.answer_callback_query(callback_id, "没有权限。")
             return
 
+        if data.startswith("fzw:"):
+            self._handle_fillzones_window_callback(
+                callback_id,
+                chat_id,
+                message_id,
+                data,
+            )
+            return
         if data.startswith("fz:"):
             self._handle_fillzones_view_callback(
                 callback_id,
@@ -4384,7 +4392,15 @@ class TelegramBot:
         placeholder_id = self._send_loading(chat_id, "🔍 正在拉取自动账户成交并聚类…")
         def work():
             try:
-                rows, account_count = self._fetch_fillzones_rows(proc, symbols, accounts)
+                window_min = int(float(str(
+                    self.store.get_chat_setting(chat_id, f"fillzones_window:{proc}", "60")
+                ) or 60))
+            except (TypeError, ValueError):
+                window_min = 60
+            try:
+                rows, account_count = self._fetch_fillzones_rows(
+                    proc, symbols, accounts, window_min=window_min
+                )
             except Exception as exc:
                 print(f"[fillzones] report failed: {exc}")
                 text = f"成交区统计失败: {exc}"
@@ -4408,6 +4424,7 @@ class TelegramBot:
                     self.client.send_message(chat_id, text)
                 return
             now_ms = int(time.time() * 1000)
+            self.store.set_chat_setting(chat_id, f"fillzones_window:{proc}", str(window_min), now_ms)
             self.store.set_chat_setting(chat_id, self._fillzones_ctx_key(proc), json.dumps(rows), now_ms)
             self.store.set_chat_setting(
                 chat_id,
@@ -4416,8 +4433,11 @@ class TelegramBot:
                 now_ms,
             )
             view = str(self.store.get_chat_setting(chat_id, f"fillzones_view:{proc}", "table") or "table")
-            text = self._format_fillzones_view(proc, symbols, rows, account_count, view)
-            keyboard = self._fillzones_keyboard(proc, view)
+            text = self._format_fillzones_view(
+                proc, symbols, rows, account_count, view,
+                window_label=self._fillzones_window_label(window_min),
+            )
+            keyboard = self._fillzones_keyboard(proc, view, window_min)
             if placeholder_id is not None:
                 try:
                     self.client.edit_message_text(
@@ -4438,15 +4458,33 @@ class TelegramBot:
             )
         threading.Thread(target=work, daemon=True).start()
 
-    def _fetch_fillzones_rows(self, proc, symbols, accounts):
+    def _fetch_fillzones_rows(self, proc, symbols, accounts, window_min=None):
         selected = set(symbols)
         api = self.monitor.api
         workers = max(1, int(getattr(self.config.hunter, "scan_workers", 6)))
+        cutoff = None
+        if window_min:
+            cutoff = int(time.time() * 1000) - int(window_min) * 60000
 
         def fetch_fills(account):
             address = str(account.get("address", ""))
             try:
-                fills = api.user_fills(address) or []
+                if cutoff is None:
+                    fills = api.user_fills(address) or []
+                else:
+                    fills = []
+                    end = int(time.time() * 1000) + 1000
+                    for _ in range(4):
+                        batch = api.user_fills_by_time(address, cutoff, end) or []
+                        if not batch:
+                            break
+                        fills.extend(batch)
+                        if len(batch) < 2000 or len(fills) >= 8000:
+                            break
+                        times = [int(item.get("time") or 0) for item in batch if item.get("time")]
+                        if not times:
+                            break
+                        end = min(times) - 1
             except Exception:
                 return []
             out = []
@@ -4505,8 +4543,12 @@ class TelegramBot:
         account_count = len({str(a.get("address", "")) for a in accounts[:40]})
         return rows, account_count
 
-    def _format_fillzones_view(self, proc, symbols, rows, account_count, view):
-        summary = f"统计账户：{account_count} 个 · 标的：{'、'.join(sorted(symbols))} · 每账户最近 2000 笔成交"
+    def _format_fillzones_view(
+        self, proc, symbols, rows, account_count, view, window_label=None
+    ):
+        summary = f"统计账户：{account_count} 个 · 标的：{'、'.join(sorted(symbols))} · 每账户最近 2000 笔"
+        if window_label:
+            summary += f" · 窗口：{window_label}"
         if view == "graph":
             return self._format_fillzones_graph(proc, rows, summary)
         return self._format_fillzones_table(proc, rows, summary)
@@ -4580,14 +4622,27 @@ class TelegramBot:
         lines.append("🟢 = 买入 · 🔴 = 卖出；每个标的内按价格从高到低排列。")
         return "\n".join(lines)
 
-    def _fillzones_keyboard(self, proc, view):
+    @staticmethod
+    def _fillzones_window_label(window_min):
+        return dict(FILL_WINDOWS).get(int(window_min), f"{int(window_min)}分钟")
+
+    def _fillzones_keyboard(self, proc, view, window_min=60):
+        rows = []
+        current = []
+        for minutes, label in FILL_WINDOWS:
+            btn_text = f"✅ {label}" if int(minutes) == int(window_min) else label
+            current.append(
+                {"text": btn_text, "callback_data": f"fzw:{proc}:{minutes}"}
+            )
+            if len(current) >= 4:
+                rows.append(current)
+                current = []
+        if current:
+            rows.append(current)
         target = "graph" if view == "table" else "table"
         label = "📈 图形视图" if view == "table" else "📊 表格视图"
-        return {
-            "inline_keyboard": [
-                [{"text": label, "callback_data": f"fz:{proc}:{target}"}]
-            ]
-        }
+        rows.append([{"text": label, "callback_data": f"fz:{proc}:{target}"}])
+        return {"inline_keyboard": rows}
 
     def _handle_fillzones_view_callback(self, callback_id, chat_id, message_id, data):
         try:
@@ -4615,8 +4670,19 @@ class TelegramBot:
             view,
             int(time.time() * 1000),
         )
-        text = self._format_fillzones_view(proc, symbols, rows, account_count, view)
-        keyboard = self._fillzones_keyboard(proc, view)
+        try:
+            window_min = int(float(str(self.store.get_chat_setting(chat_id, f"fillzones_window:{proc}", "60"))))
+        except (TypeError, ValueError):
+            window_min = 60
+        text = self._format_fillzones_view(
+            proc,
+            symbols,
+            rows,
+            account_count,
+            view,
+            window_label=self._fillzones_window_label(window_min),
+        )
+        keyboard = self._fillzones_keyboard(proc, view, window_min)
         try:
             self.client.edit_message_text(
                 chat_id,
@@ -4630,3 +4696,87 @@ class TelegramBot:
             self.client.answer_callback_query(callback_id, "切换失败，请重试。")
             return
         self.client.answer_callback_query(callback_id)
+
+
+    def _handle_fillzones_window_callback(self, callback_id, chat_id, message_id, data):
+        try:
+            _, proc, minutes_text = data.split(":", 2)
+            window_min = int(minutes_text)
+        except (ValueError, IndexError):
+            self.client.answer_callback_query(callback_id)
+            return
+        raw_symbols = self.store.get_chat_setting(chat_id, f"fillzones_symbols:{proc}", None)
+        if not raw_symbols:
+            self.client.answer_callback_query(callback_id, "请先重新运行 /fillzones。")
+            return
+        try:
+            symbols = json.loads(raw_symbols)
+        except (TypeError, ValueError):
+            self.client.answer_callback_query(callback_id, "缓存已失效，请重新运行 /fillzones。")
+            return
+        now_ms = int(time.time() * 1000)
+        self.store.set_chat_setting(chat_id, f"fillzones_window:{proc}", str(window_min), now_ms)
+        try:
+            self.client.edit_message_text(
+                chat_id,
+                message_id,
+                f"正在切换到 {self._fillzones_window_label(window_min)} 窗口并重新聚类…",
+            )
+        except Exception:
+            pass
+        view = str(self.store.get_chat_setting(chat_id, f"fillzones_view:{proc}", "table") or "table")
+
+        def work():
+            try:
+                accounts = self.store.get_auto_accounts(chat_id, proc)
+                rows, account_count = self._fetch_fillzones_rows(
+                    proc, symbols, accounts, window_min=window_min
+                )
+            except Exception as exc:
+                print(f"[fillzones] window fetch failed: {exc}")
+                try:
+                    self.client.edit_message_text(
+                        chat_id,
+                        message_id,
+                        f"切换窗口失败: {exc}",
+                    )
+                except Exception:
+                    pass
+                self.client.answer_callback_query(callback_id, "切换失败")
+                return
+            ts = int(time.time() * 1000)
+            self.store.set_chat_setting(chat_id, self._fillzones_ctx_key(proc), json.dumps(rows), ts)
+            if not rows:
+                scope = "、".join(sorted(symbols))
+                try:
+                    self.client.edit_message_text(
+                        chat_id,
+                        message_id,
+                        f"进程 {proc}：这些自动账户在 {self._fillzones_window_label(window_min)} 窗口内、{scope} 上没有可聚类的成交。",
+                    )
+                except Exception:
+                    pass
+                self.client.answer_callback_query(callback_id)
+                return
+            text = self._format_fillzones_view(
+                proc,
+                symbols,
+                rows,
+                account_count,
+                view,
+                window_label=self._fillzones_window_label(window_min),
+            )
+            keyboard = self._fillzones_keyboard(proc, view, window_min)
+            try:
+                self.client.edit_message_text(
+                    chat_id,
+                    message_id,
+                    text,
+                    reply_markup=keyboard,
+                    parse_mode="HTML",
+                )
+            except Exception as exc:
+                print(f"[fillzones] window refresh failed: {exc}")
+            self.client.answer_callback_query(callback_id)
+
+        threading.Thread(target=work, daemon=True).start()
