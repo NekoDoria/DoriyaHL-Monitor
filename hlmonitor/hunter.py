@@ -224,7 +224,7 @@ def _fill_win_stats(fills):
     }
 
 
-def scan(config, api, progress=None, coins=None, swing_mode=None):
+def scan(config, api, progress=None, coins=None, swing_mode=None, max_results=None):
     """粗筛排行榜 -> 精算胜率 -> 过滤 -> 按综合评分排序，返回收集列表。"""
     hunter = config.hunter
     rows = fetch_leaderboard(config.network, config.proxy_url)
@@ -301,7 +301,8 @@ def scan(config, api, progress=None, coins=None, swing_mode=None):
         results.append(cand)
 
     results.sort(key=lambda item: item["score"], reverse=True)
-    return results[: hunter.top_n]
+    cap = hunter.top_n if max_results is None else max(1, int(max_results))
+    return results[:cap]
 
 
 def format_hunt_results_html(results, title="大户扫描"):

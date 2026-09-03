@@ -77,6 +77,14 @@ CREATE TABLE IF NOT EXISTS collected_accounts (
     sample_size        INTEGER NOT NULL,
     scanned_at         INTEGER NOT NULL
 );
+CREATE TABLE IF NOT EXISTS auto_accounts (
+    chat_id       TEXT NOT NULL,
+    address       TEXT NOT NULL,
+    alias         TEXT NOT NULL DEFAULT '',
+    account_value REAL NOT NULL DEFAULT 0,
+    scanned_at    INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (chat_id, address)
+);
 CREATE INDEX IF NOT EXISTS idx_events_ts ON events(ts);
 CREATE INDEX IF NOT EXISTS idx_snapshots_addr_ts ON snapshots(address, ts);
 """
@@ -269,6 +277,55 @@ class EventStore:
             for address, alias, account_value, volume, pnl, roi, win_rate,
             weighted_win_rate, profit_factor, score, sample_size, scanned_at in rows
         ]
+
+    def upsert_auto_account(self, chat_id, account, ts=None):
+        with self._lock:
+            self.conn.execute(
+                "INSERT OR REPLACE INTO auto_accounts("
+                " chat_id, address, alias, account_value, scanned_at)"
+                " VALUES (?,?,?,?,?)",
+                (
+                    str(chat_id),
+                    str(account.get("address", "")).lower(),
+                    str(account.get("alias") or ""),
+                    _as_float(account.get("account_value"), 0.0),
+                    int(ts or account.get("scanned_at") or 0),
+                ),
+            )
+            self.conn.commit()
+
+    def get_auto_accounts(self, chat_id):
+        with self._lock:
+            rows = self.conn.execute(
+                "SELECT address, alias, account_value, scanned_at"
+                " FROM auto_accounts WHERE chat_id = ?"
+                " ORDER BY scanned_at DESC, account_value DESC",
+                (str(chat_id),),
+            ).fetchall()
+        return [
+            {
+                "address": address,
+                "alias": alias,
+                "account_value": account_value,
+                "scanned_at": int(scanned_at or 0),
+            }
+            for address, alias, account_value, scanned_at in rows
+        ]
+
+    def remove_auto_accounts(self, chat_id):
+        with self._lock:
+            self.conn.execute(
+                "DELETE FROM auto_accounts WHERE chat_id = ?", (str(chat_id),)
+            )
+            self.conn.commit()
+
+    def chat_ids_with_setting(self, key, value="1"):
+        with self._lock:
+            rows = self.conn.execute(
+                "SELECT chat_id FROM chat_settings WHERE key = ? AND value = ?",
+                (key, value),
+            ).fetchall()
+        return [str(row[0]) for row in rows]
 
     def delete_collected_account(self, address):
         with self._lock:

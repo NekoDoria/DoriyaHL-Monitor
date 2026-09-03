@@ -64,8 +64,11 @@ class HyperliquidAPI:
             payload["endTime"] = int(end_time)
         return self._post(payload)
 
-    def frontend_open_orders(self, address):
-        return self._post({"type": "frontendOpenOrders", "user": address})
+    def frontend_open_orders(self, address, dex=None):
+        payload = {"type": "frontendOpenOrders", "user": address}
+        if dex:
+            payload["dex"] = dex
+        return self._post(payload)
 
     def user_funding(self, address):
         return self._post({"type": "userFunding", "user": address})
