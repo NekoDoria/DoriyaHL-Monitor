@@ -1746,6 +1746,14 @@ class TelegramBot:
             self.client.answer_callback_query(callback_id, "没有权限。")
             return
 
+        if data.startswith("oz:"):
+            self._handle_zones_view_callback(
+                callback_id,
+                chat_id,
+                message_id,
+                data,
+            )
+            return
         if data.startswith("fzw:"):
             self._handle_fillzones_window_callback(
                 callback_id,
@@ -4220,10 +4228,14 @@ class TelegramBot:
 
     # ---------- auto account order zones ----------
 
+
+    def _zones_ctx_key(self, proc):
+        return f"zones_rows:{proc}"
+
     def _cmd_zones(self, chat_id, args):
         names = self._autohunt_names(chat_id)
         if not names:
-            self.client.send_message(chat_id, "还没有自动猎手进程，先 /autohunt new 名称。")
+            self.client.send_message(chat_id, "还没有自动猎手进程，先 /hunt auto new 名称。")
             return
         parts = args.strip().split()
         proc = None
@@ -4237,7 +4249,7 @@ class TelegramBot:
         else:
             self.client.send_message(
                 chat_id,
-                "你有多个自动猎手进程，请指定：/zones 进程名 [标的]，例如 /zones btc BTC GOLD。\n"
+                "你有多个自动猎手进程，请指定：/orders hunt 进程名 [标的]，例如 /orders hunt btc BTC GOLD。\n"
                 "进程：" + "、".join(sorted(names)),
             )
             return
@@ -4254,7 +4266,7 @@ class TelegramBot:
         if not symbols:
             self.client.send_message(
                 chat_id,
-                f"进程 {proc} 设的是综合，/zones {proc} 需要带标的，例如 /zones {proc} BTC GOLD。",
+                f"进程 {proc} 设的是综合，/orders hunt {proc} 需要带标的，例如 /orders hunt {proc} BTC GOLD。",
             )
             return
         accounts = self.store.get_auto_accounts(chat_id, proc)
@@ -4264,20 +4276,61 @@ class TelegramBot:
         placeholder_id = self._send_loading(chat_id, "🔍 正在拉取自动账户挂单并聚合…")
         def work():
             try:
-                text = self._build_auto_zones_report(chat_id, proc, symbols, accounts)
+                rows, account_count = self._fetch_auto_zones_rows(proc, symbols, accounts)
             except Exception as exc:
                 print(f"[zones] report failed: {exc}")
                 text = f"挂单区统计失败: {exc}"
+                if placeholder_id is not None:
+                    try:
+                        self.client.edit_message_text(chat_id, placeholder_id, text)
+                    except Exception:
+                        self.client.send_message(chat_id, text)
+                else:
+                    self.client.send_message(chat_id, text)
+                return
+            if not rows:
+                scope = "、".join(sorted(symbols))
+                text = f"进程 {proc}：这些自动账户目前在 {scope} 上没有可聚类的挂单。"
+                if placeholder_id is not None:
+                    try:
+                        self.client.edit_message_text(chat_id, placeholder_id, text)
+                    except Exception:
+                        self.client.send_message(chat_id, text)
+                else:
+                    self.client.send_message(chat_id, text)
+                return
+            now_ms = int(time.time() * 1000)
+            self.store.set_chat_setting(chat_id, self._zones_ctx_key(proc), json.dumps(rows), now_ms)
+            self.store.set_chat_setting(
+                chat_id,
+                f"zones_symbols:{proc}",
+                json.dumps(sorted(symbols), ensure_ascii=False),
+                now_ms,
+            )
+            view = str(self.store.get_chat_setting(chat_id, f"zones_view:{proc}", "table") or "table")
+            text = self._format_zones_view(proc, symbols, rows, account_count, view)
+            keyboard = self._zones_keyboard(proc, view)
             if placeholder_id is not None:
                 try:
-                    self.client.edit_message_text(chat_id, placeholder_id, text, parse_mode="HTML")
+                    self.client.edit_message_text(
+                        chat_id,
+                        placeholder_id,
+                        text,
+                        reply_markup=keyboard,
+                        parse_mode="HTML",
+                    )
+                    return
                 except Exception:
-                    self.client.send_message(chat_id, text, parse_mode="HTML")
-            else:
-                self.client.send_message(chat_id, text, parse_mode="HTML")
+                    pass
+            self.client.send_message(
+                chat_id,
+                text,
+                reply_markup=keyboard,
+                parse_mode="HTML",
+            )
         threading.Thread(target=work, daemon=True).start()
 
-    def _build_auto_zones_report(self, chat_id, proc, symbols, accounts):
+    def _fetch_auto_zones_rows(self, proc, symbols, accounts):
         selected = set(symbols)
         api = self.monitor.api
         dex_map = _build_coin_dex_map(api)
@@ -4316,9 +4369,6 @@ class TelegramBot:
                     item["coin"] = symbol
                     item["_account"] = address
                     flat.append(item)
-        if not flat:
-            scope = "、".join(sorted(selected))
-            return f"进程 {proc}：这些自动账户目前在 {scope} 上没有普通挂单。"
         merge = self.config.order_merge
         clusters = cluster_open_orders(
             flat,
@@ -4348,32 +4398,128 @@ class TelegramBot:
                 }
             )
         rows.sort(key=lambda item: (item["accounts"], item["value"]), reverse=True)
-        rows = rows[:12]
+        rows = rows[:20]
         account_count = len({str(a.get("address", "")) for a in accounts[:40]})
-        lines = [
-            f"<b>自动猎手 {proc} · 挂单密集区</b>",
-            f"统计账户：{account_count} 个 · 标的：{'、'.join(sorted(selected))}",
-            "<table bordered compact>",
-            "<tr><td>方向</td><td>币种</td><td>价格区间</td><td>单数/账户</td><td>名义金额</td></tr>",
-        ]
-        for item in rows:
-            if item["max_px"] >= 1000:
-                price = f"{item['min_px']:,.0f} - {item['max_px']:,.0f}"
-            else:
-                price = f"{item['min_px']:,.2f} - {item['max_px']:,.2f}"
-            lines.append(
-                "<tr>"
-                f"<td>{item['side']}</td>"
-                f"<td>{item['coin']}</td>"
-                f"<td>{price}</td>"
-                f"<td>{item['orders']}单/{item['accounts']}户</td>"
-                f"<td>{fmt_usd_cn(item['value'])}</td>"
-                "</tr>"
+        return rows, account_count
+
+    def _format_zones_view(self, proc, symbols, rows, account_count, view):
+        summary = f"统计账户：{account_count} 个 · 标的：{'、'.join(sorted(symbols))}"
+        if view == "graph":
+            return self._format_zones_graph(proc, rows, summary)
+        return self._format_zones_table(proc, rows, summary)
+
+    def _format_zones_table(self, proc, rows, summary):
+        lines = [f"<b>自动猎手 {proc} · 挂单密集区（表格）</b>", summary]
+        coins = list(dict.fromkeys(r["coin"] for r in rows))
+        for coin in coins:
+            coin_rows = sorted(
+                (r for r in rows if r["coin"] == coin),
+                key=lambda r: r["max_px"],
+                reverse=True,
             )
-        lines.append("</table>")
-        lines.append("数据为实时查询；价格相近的挂单会自动聚成区间。")
+            if not coin_rows:
+                continue
+            lines.append(f"<b>{coin}</b>")
+            lines.append("<table bordered compact>")
+            lines.append(
+                "<tr><td></td><td>价格区间</td><td>单数/账户</td><td>名义金额</td></tr>"
+            )
+            for item in coin_rows:
+                marker = self._fill_side_marker(item["side"])
+                if item["max_px"] >= 1000:
+                    price = f"{item['min_px']:,.0f} - {item['max_px']:,.0f}"
+                else:
+                    price = f"{item['min_px']:,.2f} - {item['max_px']:,.2f}"
+                lines.append(
+                    "<tr>"
+                    f"<td>{marker}</td>"
+                    f"<td>{price}</td>"
+                    f"<td>{item['orders']}单/{item['accounts']}户</td>"
+                    f"<td>{fmt_usd_cn(item['value'])}</td>"
+                    "</tr>"
+                )
+            lines.append("</table>")
+        lines.append("🟢 = 买入 · 🔴 = 卖出；每个标的内按价格从高到低排列。")
         return "\n".join(lines)
 
+    def _format_zones_graph(self, proc, rows, summary):
+        lines = [f"<b>自动猎手 {proc} · 挂单密集区（图形）</b>", summary]
+        coins = list(dict.fromkeys(r["coin"] for r in rows))
+        for coin in coins:
+            coin_rows = sorted(
+                (r for r in rows if r["coin"] == coin),
+                key=lambda r: r["max_px"],
+                reverse=True,
+            )
+            if not coin_rows:
+                continue
+            lines.append(f"<b>{coin}</b>")
+            max_value = max(r["value"] for r in coin_rows) or 1
+            width = 22
+            chart = []
+            for item in coin_rows:
+                bar_len = max(1, round(item["value"] / max_value * width))
+                if item["max_px"] >= 1000:
+                    price = f"{item['min_px']:,.0f}-{item['max_px']:,.0f}"
+                else:
+                    price = f"{item['min_px']:,.2f}-{item['max_px']:,.2f}"
+                marker = self._fill_side_marker(item["side"])
+                bar = "-" * bar_len
+                chart.append(f"{marker} {price} {bar} | {fmt_usd_cn(item['value'])}")
+            lines.append("<pre>" + "\n".join(html.escape(row) for row in chart) + "</pre>")
+        lines.append("🟢 = 买入 · 🔴 = 卖出；每个标的内按价格从高到低排列。")
+        return "\n".join(lines)
+
+    def _zones_keyboard(self, proc, view):
+        target = "graph" if view == "table" else "table"
+        label = "📈 图形视图" if view == "table" else "📊 表格视图"
+        return {
+            "inline_keyboard": [
+                [{"text": label, "callback_data": f"oz:{proc}:{target}"}]
+            ]
+        }
+
+    def _handle_zones_view_callback(self, callback_id, chat_id, message_id, data):
+        try:
+            _, proc, view = data.split(":", 2)
+        except ValueError:
+            self.client.answer_callback_query(callback_id)
+            return
+        raw_rows = self.store.get_chat_setting(chat_id, self._zones_ctx_key(proc), None)
+        raw_symbols = self.store.get_chat_setting(chat_id, f"zones_symbols:{proc}", None)
+        if not raw_rows or not raw_symbols:
+            self.client.answer_callback_query(callback_id, "请先重新运行 /orders hunt。")
+            return
+        try:
+            rows = json.loads(raw_rows)
+            symbols = json.loads(raw_symbols)
+        except (TypeError, ValueError):
+            self.client.answer_callback_query(callback_id, "缓存已失效，请重新运行 /orders hunt。")
+            return
+        account_count = len(
+            {str(a.get("address", "")) for a in self.store.get_auto_accounts(chat_id, proc)}
+        )
+        self.store.set_chat_setting(
+            chat_id,
+            f"zones_view:{proc}",
+            view,
+            int(time.time() * 1000),
+        )
+        text = self._format_zones_view(proc, symbols, rows, account_count, view)
+        keyboard = self._zones_keyboard(proc, view)
+        try:
+            self.client.edit_message_text(
+                chat_id,
+                message_id,
+                text,
+                reply_markup=keyboard,
+                parse_mode="HTML",
+            )
+        except Exception as exc:
+            print(f"[zones] view switch failed: {exc}")
+            self.client.answer_callback_query(callback_id, "切换失败，请重试。")
+            return
+        self.client.answer_callback_query(callback_id)
 
     # ---------- auto account fill zones ----------
 
