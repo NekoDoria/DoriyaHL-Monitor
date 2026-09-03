@@ -1581,7 +1581,9 @@ class TelegramBot:
     def _process_update(self, update):
         callback = update.get("callback_query")
         if callback:
-            self._process_callback(callback)
+            # Run every button callback on a worker thread so the polling
+            # thread is never blocked by network requests.
+            self._async(lambda cb=callback: self._process_callback(cb))
             return
 
         message = update.get("message") or update.get("edited_message")
@@ -2526,14 +2528,16 @@ class TelegramBot:
             if not address:
                 self.client.send_message(chat_id, "找不到该地址或命名。")
                 return
-            self._send_status(chat_id, address, sort_mode)
+            self._async(lambda: self._send_status(chat_id, address, sort_mode))
             return
 
         subscriptions = self.store.get_subscriptions(chat_id=chat_id, active_only=False)
         if not subscriptions:
             self.client.send_message(chat_id, "当前没有监控地址，请用 /add 添加。")
             return
-        self._send_status(chat_id, subscriptions[0]["address"], sort_mode)
+        self._async(
+            lambda: self._send_status(chat_id, subscriptions[0]["address"], sort_mode)
+        )
 
     def _cmd_stats(self, chat_id, args):
         subscriptions = self.store.get_subscriptions(
@@ -2563,24 +2567,26 @@ class TelegramBot:
             address,
             int(time.time() * 1000),
         )
-        placeholder_id = self._send_loading(chat_id, "⏳ 正在获取成交统计…")
-        try:
-            self.router.refresh_fill_stats(
-                chat_id,
-                address,
-                force_new=True,
-                target_message_id=placeholder_id,
-            )
-        except Exception as exc:
-            error_text = f"打开成交统计失败: {exc}"
-            if placeholder_id is not None:
-                self.client.edit_message_text(
+        def work():
+            placeholder_id = self._send_loading(chat_id, "⏳ 正在获取成交统计…")
+            try:
+                self.router.refresh_fill_stats(
                     chat_id,
-                    placeholder_id,
-                    error_text,
+                    address,
+                    force_new=True,
+                    target_message_id=placeholder_id,
                 )
-            else:
-                self.client.send_message(chat_id, error_text)
+            except Exception as exc:
+                error_text = f"打开成交统计失败: {exc}"
+                if placeholder_id is not None:
+                    self.client.edit_message_text(
+                        chat_id,
+                        placeholder_id,
+                        error_text,
+                    )
+                else:
+                    self.client.send_message(chat_id, error_text)
+        self._async(work)
 
     def _cmd_history(self, chat_id, args):
         subscriptions = self.store.get_subscriptions(
@@ -2604,29 +2610,31 @@ class TelegramBot:
             self.client.send_message(chat_id, "当前没有监控地址，请用 /add 添加。")
             return
 
-        placeholder_id = self._send_loading(chat_id, "⏳ 正在整理持仓历史…")
-        try:
-            report = self.monitor.history_report(address)
-        except Exception as exc:
-            error_text = f"查询持仓历史失败: {exc}"
+        def work():
+            placeholder_id = self._send_loading(chat_id, "⏳ 正在整理持仓历史…")
+            try:
+                report = self.monitor.history_report(address)
+            except Exception as exc:
+                error_text = f"查询持仓历史失败: {exc}"
+                if placeholder_id is not None:
+                    self.client.edit_message_text(
+                        chat_id,
+                        placeholder_id,
+                        error_text,
+                    )
+                else:
+                    self.client.send_message(chat_id, error_text)
+                return
             if placeholder_id is not None:
                 self.client.edit_message_text(
                     chat_id,
                     placeholder_id,
-                    error_text,
+                    report,
+                    parse_mode="HTML",
                 )
             else:
-                self.client.send_message(chat_id, error_text)
-            return
-        if placeholder_id is not None:
-            self.client.edit_message_text(
-                chat_id,
-                placeholder_id,
-                report,
-                parse_mode="HTML",
-            )
-        else:
-            self.client.send_message(chat_id, report, parse_mode="HTML")
+                self.client.send_message(chat_id, report, parse_mode="HTML")
+        self._async(work)
 
     def _cmd_hunt(self, chat_id, args):
         if args.strip():
@@ -3261,7 +3269,7 @@ class TelegramBot:
         if not address:
             self.client.send_message(chat_id, "当前没有监控地址，请用 /add 添加。")
             return
-        self._send_tpsl(chat_id, address)
+        self._async(lambda: self._send_tpsl(chat_id, address))
 
     def _send_tpsl(self, chat_id, address):
         self.client.send_typing(chat_id)
@@ -3332,8 +3340,12 @@ class TelegramBot:
             if not address:
                 self.client.send_message(chat_id, "找不到该地址或命名。")
                 return
-            self.client.send_typing(chat_id)
-            self._show_orders_coin_menu(chat_id, address)
+            self._async(
+                lambda: (
+                    self.client.send_typing(chat_id),
+                    self._show_orders_coin_menu(chat_id, address),
+                )
+            )
             return
         if not subscriptions:
             self.client.send_message(chat_id, "当前没有监控地址，请用 /add 添加。")
@@ -3670,6 +3682,9 @@ class TelegramBot:
             return
         self._show_orders_account_menu(chat_id, target_message_id=message_id)
         self.client.answer_callback_query(callback_id)
+
+    def _async(self, fn):
+        threading.Thread(target=fn, daemon=True).start()
 
     def _send_loading(self, chat_id, text="⏳ 正在获取数据，请稍候…"):
         try:
