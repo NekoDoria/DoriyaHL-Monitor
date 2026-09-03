@@ -3966,7 +3966,14 @@ class TelegramBot:
             )
             return
 
-        if mode in {"on", "off", "now", "del", "run"}:
+        if mode in {"progress", "prog"} and not rest and len(names) > 1:
+            blocks = [
+                self._autohunt_progress_text(chat_id, name)
+                for name in sorted(names)
+            ]
+            self.client.send_message(chat_id, "\n\n".join(blocks))
+            return
+        if mode in {"on", "off", "now", "del", "run", "progress", "prog"}:
             if rest:
                 name = rest.split()[0].lower()
             elif len(names) == 1:
@@ -3996,6 +4003,12 @@ class TelegramBot:
                     self.client.send_message(chat_id, f"进程 {name} 还没选标的，先 /autohunt new {name} 重设。")
                     return
                 self._start_auto_scan(chat_id, name, manual=True)
+            elif mode in {"progress", "prog"}:
+                cfg = self._auto_config(chat_id, name)
+                self.client.send_message(
+                    chat_id,
+                    self._autohunt_progress_text(chat_id, name, cfg),
+                )
             elif mode == "del":
                 self.store.remove_auto_accounts(chat_id, name)
                 for field in ("coins", "limit", "interval_h", "enabled", "last_run"):
@@ -4008,7 +4021,7 @@ class TelegramBot:
             "用法：\n"
             "/autohunt new 名称 - 新建一个自动猎手进程\n"
             "/autohunt list - 查看所有进程\n"
-            "/autohunt on|off|now|del [名称] - 启动/停止/立即跑/删除（只有一个时可省略名称）\n"
+            "/autohunt on|off|now|del|progress [名称] - 启动/停止/立即跑/删除/查进度（一个时可省略名称）\n"
             "查看挂单区：/zones 进程名 [标的]",
         )
 
@@ -4073,28 +4086,76 @@ class TelegramBot:
 
         threading.Thread(target=run_locked, daemon=True).start()
 
+    def _autohunt_progress_text(self, chat_id, name, cfg=None):
+        cfg = cfg or self._auto_config(chat_id, name)
+        if not cfg:
+            return f"进程 {name} 不存在。"
+        key = self._auto_key
+        running = str(self.store.get_chat_setting(chat_id, key(name, "progress_running"), None)) == "1"
+        accounts = self.store.get_auto_accounts(chat_id, name)
+        lines = [f"进程 {name}"]
+        if running:
+            try:
+                done = int(float(str(self.store.get_chat_setting(chat_id, key(name, "progress_done"), "0"))))
+                total = int(float(str(self.store.get_chat_setting(chat_id, key(name, "progress_total"), "0"))))
+            except (TypeError, ValueError):
+                done = 0
+                total = 0
+            total = max(total, 1)
+            done = min(max(done, 0), total)
+            pct = done / total
+            width = 12
+            filled = round(pct * width)
+            bar = "█" * filled + "░" * (width - filled)
+            lines.append(f"扫描中 {bar} {done}/{total} ({pct * 100:.0f}%)")
+        elif cfg["enabled"]:
+            if cfg["last_run"]:
+                next_ms = cfg["last_run"] + int(max(1.0, cfg["interval_h"]) * 3600000)
+                wait_min = max(0, int((next_ms - int(time.time() * 1000)) / 60000))
+                lines.append(f"等待下一轮：约 {wait_min} 分钟后")
+            else:
+                lines.append("已开启，等待首轮扫描")
+        else:
+            lines.append("已停止")
+        scope = "、".join(cfg["coins"]) if cfg["coins"] else "综合"
+        lines.append(f"标的：{scope} · 每轮 {cfg['limit']} · 间隔 {cfg['interval_h']:g}h · 已收集 {len(accounts)}")
+        lines.append("/autohunt now " + name + " 可立即跑一轮")
+        return "\n".join(lines)
+
     def _run_auto_scan(self, chat_id, name):
         cfg = self._auto_config(chat_id, name)
         if not cfg or not cfg["configured"]:
             return
         now_ms = int(time.time() * 1000)
+        key = self._auto_key
+        self.store.set_chat_setting(chat_id, key(name, "progress_running"), "1", now_ms)
+        self.store.set_chat_setting(chat_id, key(name, "progress_done"), "0", now_ms)
+        self.store.set_chat_setting(chat_id, key(name, "progress_total"), "0", now_ms)
         skip_hours = float(getattr(self.config.hunter, "auto_skip_hours", 12.0))
         since_ms = int(now_ms - max(skip_hours, 0.5) * 3600000)
         seen = self.store.recent_auto_scanned(chat_id, name, since_ms)
         scanned_out = []
-        results = scan(
-            self.config,
-            self.monitor.api,
-            coins=cfg["coins"],
-            max_results=cfg["limit"],
-            exclude=seen,
-            scanned_out=scanned_out,
-        )
-        if scanned_out:
-            self.store.record_auto_scanned(chat_id, name, scanned_out, ts=now_ms)
-        self.store.purge_auto_scanned(chat_id, name, since_ms)
-        for item in results:
-            self.store.upsert_auto_account(chat_id, name, item, ts=now_ms)
+        try:
+            def progress(done, total, address):
+                ts = int(time.time() * 1000)
+                self.store.set_chat_setting(chat_id, key(name, "progress_done"), str(done), ts)
+                self.store.set_chat_setting(chat_id, key(name, "progress_total"), str(total), ts)
+            results = scan(
+                self.config,
+                self.monitor.api,
+                coins=cfg["coins"],
+                max_results=cfg["limit"],
+                exclude=seen,
+                scanned_out=scanned_out,
+                progress=progress,
+            )
+            if scanned_out:
+                self.store.record_auto_scanned(chat_id, name, scanned_out, ts=now_ms)
+            self.store.purge_auto_scanned(chat_id, name, since_ms)
+            for item in results:
+                self.store.upsert_auto_account(chat_id, name, item, ts=now_ms)
+        finally:
+            self.store.set_chat_setting(chat_id, key(name, "progress_running"), None, int(time.time() * 1000))
         total = len(self.store.get_auto_accounts(chat_id, name))
         scope = "、".join(cfg["coins"]) if cfg["coins"] else "综合"
         self.client.send_message(
