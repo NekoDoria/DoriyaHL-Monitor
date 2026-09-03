@@ -18,6 +18,8 @@ STATS_BASE = "https://stats-data.hyperliquid.xyz/{network}/leaderboard"
 
 _cache_lock = threading.RLock()
 _leaderboard_cache: dict[str, tuple[float, list]] = {}
+_dex_map_cache: dict[str, tuple[float, dict]] = {}
+_DEX_MAP_TTL = 21600.0
 
 
 def _num(value, default=0.0):
@@ -44,6 +46,107 @@ def _window_perf(row, window="allTime"):
                 "vlm": _num(perf.get("vlm")),
             }
     return {"pnl": 0.0, "roi": 0.0, "vlm": 0.0}
+
+
+def _coin_symbol(coin):
+    coin = str(coin or "")
+    return coin.rsplit(":", 1)[-1].upper() if ":" in coin else coin.upper()
+
+
+def _build_coin_dex_map(api):
+    """Map bare symbols to the dexes where they trade (native + HIP-3)."""
+    key = str(getattr(api, "base_url", "") or "") or f"api:{id(api)}"
+    now = time.time()
+    with _cache_lock:
+        cached = _dex_map_cache.get(key)
+        if cached and now - cached[0] < _DEX_MAP_TTL:
+            return cached[1]
+
+    mapping = {}
+
+    def add(name, dex):
+        symbol = _coin_symbol(name)
+        if symbol:
+            mapping.setdefault(symbol, set()).add(dex)
+
+    try:
+        meta = api.meta() or {}
+        for item in meta.get("universe") or []:
+            add(str(item.get("name") or ""), "")
+        dexs = api.perp_dexs() or []
+        for item in dexs:
+            if not isinstance(item, dict):
+                continue
+            dex = str(item.get("name") or "")
+            if not dex:
+                continue
+            dmeta = api.meta_by_dex(dex) or {}
+            for uni in dmeta.get("universe") or []:
+                add(str(uni.get("name") or ""), dex)
+    except Exception as exc:
+        print(f"[hunter] fetch perp dex map failed: {exc}")
+
+    out = {k: sorted(v) for k, v in mapping.items()}
+    with _cache_lock:
+        _dex_map_cache[key] = (now, out)
+    return out
+
+
+def _swing_profile(api, address, coins, dex_map, hunter):
+    """Look for open positions that are big, held long, and have moved."""
+    selected = None
+    if coins:
+        selected = {_coin_symbol(c) for c in coins}
+    dexes = set()
+    if selected:
+        for symbol in selected:
+            dexes.update(dex_map.get(symbol, set()))
+    else:
+        for dex_set in dex_map.values():
+            dexes.update(dex_set)
+    if not dexes:
+        dexes.add("")
+
+    positions = []
+    for dex in sorted(dexes):
+        try:
+            state = (
+                api.clearinghouse_state(address)
+                if dex == ""
+                else api.clearinghouse_state(address, dex)
+            )
+        except Exception:
+            continue
+        for ap in state.get("assetPositions") or []:
+            p = ap.get("position") or {}
+            symbol = _coin_symbol(p.get("coin"))
+            if selected and symbol not in selected:
+                continue
+            szi = _num(p.get("szi"))
+            entry = _num(p.get("entryPx"))
+            if abs(szi) <= 1e-12 or entry <= 0:
+                continue
+            entry_notional = abs(szi) * entry
+            pos_value = _num(p.get("positionValue")) or entry_notional
+            upnl = _num(p.get("unrealizedPnl"))
+            since_open = _num((p.get("cumFunding") or {}).get("sinceOpen"))
+            positions.append(
+                {
+                    "coin": str(p.get("coin") or ""),
+                    "dex": dex,
+                    "position_value": pos_value,
+                    "move_pct": abs(upnl) / entry_notional * 100.0,
+                    "funding_pct": abs(since_open) / max(pos_value, 1.0) * 100.0,
+                }
+            )
+
+    ok = any(
+        pos["position_value"] >= float(hunter.swing_min_position_usd)
+        and pos["move_pct"] >= float(hunter.swing_min_move_pct)
+        and pos["funding_pct"] >= float(hunter.swing_min_funding_pct)
+        for pos in positions
+    )
+    return {"ok": ok, "positions": positions}
 
 
 def _leaderboard_opener(proxy_url):
@@ -121,10 +224,12 @@ def _fill_win_stats(fills):
     }
 
 
-def scan(config, api, progress=None, coins=None):
+def scan(config, api, progress=None, coins=None, swing_mode=None):
     """粗筛排行榜 -> 精算胜率 -> 过滤 -> 按综合评分排序，返回收集列表。"""
     hunter = config.hunter
     rows = fetch_leaderboard(config.network, config.proxy_url)
+    swing = bool(hunter.swing_mode) if swing_mode is None else bool(swing_mode)
+    dex_map = _build_coin_dex_map(api) if swing else {}
     candidates = []
     for row in rows:
         address = str(row.get("ethAddress") or "").lower()
@@ -180,6 +285,11 @@ def scan(config, api, progress=None, coins=None):
             continue
         if stats["weighted_win_rate"] < hunter.min_win_rate:
             continue
+        if swing:
+            profile = _swing_profile(api, cand["address"], coins, dex_map, hunter)
+            if not profile["ok"]:
+                continue
+            cand["swing_hits"] = len(profile["positions"])
         score = (
             stats["weighted_win_rate"]
             * (1.0 + max(cand["roi"], 0.0))

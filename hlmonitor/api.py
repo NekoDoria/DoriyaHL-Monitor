@@ -42,8 +42,11 @@ class HyperliquidAPI:
     def all_mids(self):
         return self._post({"type": "allMids"})
 
-    def clearinghouse_state(self, address):
-        return self._post({"type": "clearinghouseState", "user": address})
+    def clearinghouse_state(self, address, dex=None):
+        payload = {"type": "clearinghouseState", "user": address}
+        if dex:
+            payload["dex"] = dex
+        return self._post(payload)
 
     def spot_state(self, address):
         return self._post({"type": "spotClearinghouseState", "user": address})

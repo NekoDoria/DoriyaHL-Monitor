@@ -78,6 +78,10 @@ class HunterConfig:
     min_pnl: float = 0.0                   # 全时段盈亏下限（USD）
     min_roi: float = 0.0                   # 全时段收益率下限
     min_win_rate: float = 0.50             # 加权胜率下限（0-1）
+    swing_mode: bool = False               # 只留目前持大仓、拿得久且走出幅度的账户
+    swing_min_position_usd: float = 50_000.0
+    swing_min_move_pct: float = 1.5
+    swing_min_funding_pct: float = 0.1
     candidates: int = 150                  # 从合格账户中随机抽取精算的数量（不再按净值取前 N）
     top_n: int = 10                        # 最终收集数量
 

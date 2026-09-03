@@ -41,6 +41,10 @@ min_volume = 10000000           # 全时段成交量下限（USD）
 min_pnl = 0                     # 全时段盈亏下限（USD）
 min_roi = 0                     # 全时段收益率下限
 min_win_rate = 0.5              # 加权胜率下限（0-1，按盈亏金额加权）
+swing_mode = false              # true 时只留目前持大仓、拿得久且走出幅度的账户
+swing_min_position_usd = 50000  # 单仓位价值下限（USD）
+swing_min_move_pct = 1.5        # 当前仓位跑出的价格幅度下限（%）
+swing_min_funding_pct = 0.1     # 资金费积累下限（%，约等于拿了几小时到几天）
 candidates = 150                # 从全部合格账户中随机抽取精算的数量（不再按净值固定取前 40）
 top_n = 10                      # 最终收集的账户数
 

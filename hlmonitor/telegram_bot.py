@@ -288,7 +288,7 @@ def coin_list_keyboard(coins, selected, page=0, category="main"):
     return {"inline_keyboard": rows}
 
 
-def hunt_category_keyboard():
+def hunt_category_keyboard(swing=False):
     return {
         "inline_keyboard": [
             [
@@ -302,6 +302,9 @@ def hunt_category_keyboard():
             ],
             [
                 {"text": "🔍 搜索标的", "callback_data": "hq:find"},
+            ],
+            [
+                {"text": f"📈 波段/中长线：{'开' if swing else '关'}", "callback_data": "hq:swing"},
             ],
         ]
     }
@@ -2559,7 +2562,7 @@ class TelegramBot:
         self.client.send_message(
             chat_id,
             "选择要统计胜率的标的（可多选）；选「综合」则按全部交易计算：",
-            reply_markup=hunt_category_keyboard(),
+            reply_markup=hunt_category_keyboard(self._hunt_swing_enabled(chat_id)),
         )
 
     def _load_hunt_filter(self, chat_id):
@@ -2598,6 +2601,12 @@ class TelegramBot:
             json.dumps(sorted(selected), ensure_ascii=False),
             int(time.time() * 1000),
         )
+
+    def _hunt_swing_enabled(self, chat_id):
+        hunter = getattr(getattr(self, "config", None), "hunter", None)
+        if hunter is not None and getattr(hunter, "swing_mode", False):
+            return True
+        return str(self.store.get_chat_setting(chat_id, "hunt_swing", None)) == "1"
 
     def _clear_hunt_search(self, chat_id):
         now_ms = int(time.time() * 1000)
@@ -2750,6 +2759,7 @@ class TelegramBot:
                     self.monitor.api,
                     progress=progress,
                     coins=coins,
+                    swing_mode=self._hunt_swing_enabled(chat_id),
                 )
                 if limit > 0:
                     results = results[:limit]
@@ -2818,9 +2828,40 @@ class TelegramBot:
                 chat_id,
                 message_id,
                 "选择要统计胜率的标的（可多选）；选「综合」则按全部交易计算：",
-                reply_markup=hunt_category_keyboard(),
+                reply_markup=hunt_category_keyboard(self._hunt_swing_enabled(chat_id)),
             )
             self.client.answer_callback_query(callback_id)
+            return
+        if head == "swing":
+            hunter = getattr(getattr(self, "config", None), "hunter", None)
+            if hunter is not None and getattr(hunter, "swing_mode", False):
+                self.client.answer_callback_query(callback_id, "波段模式已在配置中开启。")
+                return
+            now_ms = int(time.time() * 1000)
+            new_state = not self._hunt_swing_enabled(chat_id)
+            self.store.set_chat_setting(
+                chat_id,
+                "hunt_swing",
+                "1" if new_state else None,
+                now_ms,
+            )
+            text = "选择要统计胜率的标的（可多选）；选「综合」则按全部交易计算："
+            keyboard = hunt_category_keyboard(new_state)
+            try:
+                self.client.edit_message_text(
+                    chat_id,
+                    message_id,
+                    text,
+                    reply_markup=keyboard,
+                )
+            except Exception as exc:
+                print(f"[telegram] 切换波段模式失败: {exc}")
+                self.client.answer_callback_query(callback_id, "切换失败，请重试。")
+                return
+            self.client.answer_callback_query(
+                callback_id,
+                "已开启波段/中长线模式" if new_state else "已关闭波段模式",
+            )
             return
         if head == "find":
             self._ask_hunt_search(chat_id)
