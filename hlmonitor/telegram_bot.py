@@ -6,6 +6,7 @@ import json
 import html
 import math
 import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import time
 import urllib.error
 import urllib.parse
@@ -52,6 +53,7 @@ HELP_TEXT = """Hyperliquid 地址监控 Bot
 /huntlist - 查看已收集的大户账户（可一键加入监控）
 /autohunt - 设置后台自动收集大户（可选标的、每轮数量与间隔）
 /zones [标的] - 查看自动收集账户在所选标的上的挂单密集区
+/fillzones [进程名] [标的] - 查看自动收集账户的成交密集区间
 /coins - 选择要接收交易通知的币种
 /mute - 暂停当前聊天的告警
 /unmute - 恢复当前聊天的告警
@@ -2344,6 +2346,8 @@ class TelegramBot:
             self._cmd_autohunt(chat_id, args)
         elif command == "/zones":
             self._cmd_zones(chat_id, args)
+        elif command == "/fillzones":
+            self._cmd_fillzones(chat_id, args)
         elif command == "/orders":
             self._cmd_orders(chat_id, args)
         elif command == "/recent":
@@ -4318,4 +4322,158 @@ class TelegramBot:
             )
         lines.append("</table>")
         lines.append("数据为实时查询；价格相近的挂单会自动聚成区间。")
+        return "\n".join(lines)
+
+
+    # ---------- auto account fill zones ----------
+
+    def _cmd_fillzones(self, chat_id, args):
+        names = self._autohunt_names(chat_id)
+        if not names:
+            self.client.send_message(chat_id, "还没有自动猎手进程，先 /autohunt new 名称。")
+            return
+        parts = args.strip().split()
+        proc = None
+        symbols_text = []
+        if parts and parts[0].lower() in {n.lower() for n in names}:
+            proc = next(n for n in names if n.lower() == parts[0].lower())
+            symbols_text = parts[1:]
+        elif len(names) == 1:
+            proc = names[0]
+            symbols_text = parts
+        else:
+            self.client.send_message(
+                chat_id,
+                "你有多个自动猎手进程，请指定：/fillzones 进程名 [标的]，例如 /fillzones btc BTC GOLD。\n"
+                "进程：" + "、".join(sorted(names)),
+            )
+            return
+        cfg = self._auto_config(chat_id, proc)
+        symbols = []
+        for token in symbols_text:
+            token = str(token).upper()
+            if ":" in token:
+                token = token.rsplit(":", 1)[-1]
+            if token not in symbols:
+                symbols.append(token)
+        if not symbols:
+            symbols = list((cfg or {}).get("coins") or [])
+        if not symbols:
+            self.client.send_message(
+                chat_id,
+                f"进程 {proc} 设的是综合，/fillzones {proc} 需要带标的，例如 /fillzones {proc} BTC GOLD。",
+            )
+            return
+        accounts = self.store.get_auto_accounts(chat_id, proc)
+        if not accounts:
+            self.client.send_message(chat_id, f"进程 {proc} 的自动列表还是空的，先等它跑一轮。")
+            return
+        placeholder_id = self._send_loading(chat_id, "🔍 正在拉取自动账户成交并聚类…")
+        def work():
+            try:
+                text = self._build_auto_fillzones_report(chat_id, proc, symbols, accounts)
+            except Exception as exc:
+                print(f"[fillzones] report failed: {exc}")
+                text = f"成交区统计失败: {exc}"
+            if placeholder_id is not None:
+                try:
+                    self.client.edit_message_text(chat_id, placeholder_id, text, parse_mode="HTML")
+                except Exception:
+                    self.client.send_message(chat_id, text, parse_mode="HTML")
+            else:
+                self.client.send_message(chat_id, text, parse_mode="HTML")
+        threading.Thread(target=work, daemon=True).start()
+
+    def _build_auto_fillzones_report(self, chat_id, proc, symbols, accounts):
+        selected = set(symbols)
+        api = self.monitor.api
+        workers = max(1, int(getattr(self.config.hunter, "scan_workers", 6)))
+
+        def fetch_fills(account):
+            address = str(account.get("address", ""))
+            try:
+                fills = api.user_fills(address) or []
+            except Exception:
+                return []
+            out = []
+            for fill in fills:
+                raw_coin = str(fill.get("coin") or "")
+                symbol = raw_coin.rsplit(":", 1)[-1].upper() if ":" in raw_coin else raw_coin.upper()
+                if symbol not in selected:
+                    continue
+                try:
+                    px = float(fill.get("px") or 0)
+                    size = abs(float(fill.get("sz") or 0))
+                except (TypeError, ValueError):
+                    continue
+                if px <= 0 or size <= 0:
+                    continue
+                item = dict(fill)
+                item["coin"] = symbol
+                item["_account"] = address
+                out.append(item)
+            return out
+
+        flat = []
+        if workers > 1 and len(accounts) > 1:
+            with ThreadPoolExecutor(max_workers=workers) as pool:
+                futures = {pool.submit(fetch_fills, acc): acc for acc in accounts[:40]}
+                for future in as_completed(futures):
+                    try:
+                        flat.extend(future.result())
+                    except Exception as exc:
+                        print(f"[fillzones] fetch failed: {exc}")
+        else:
+            for account in accounts[:40]:
+                flat.extend(fetch_fills(account))
+
+        if not flat:
+            scope = "、".join(sorted(selected))
+            return f"进程 {proc}：这些自动账户近期在 {scope} 上没有成交记录。"
+        clusters = _cluster_fills_by_price(flat)
+        rows = []
+        for cluster in clusters:
+            accounts_in = {str(o.get("_account") or "") for o in cluster}
+            stat = _cluster_interval_stats(cluster)
+            total_value = stat["total_value"]
+            if len(cluster) < 3 and len(accounts_in) < 2 and total_value < 200000:
+                continue
+            rows.append(
+                {
+                    "side": stat["side"],
+                    "coin": str(cluster[0].get("coin") or ""),
+                    "min_px": stat["min_px"],
+                    "max_px": stat["max_px"],
+                    "fills": len(cluster),
+                    "accounts": len(accounts_in),
+                    "value": total_value,
+                    "first_time": stat["first_time"],
+                    "last_time": stat["last_time"],
+                }
+            )
+        rows.sort(key=lambda item: (item["accounts"], item["value"]), reverse=True)
+        rows = rows[:12]
+        account_count = len({str(a.get("address", "")) for a in accounts[:40]})
+        lines = [
+            f"<b>自动猎手 {proc} · 成交密集区间</b>",
+            f"统计账户：{account_count} 个 · 标的：{'、'.join(sorted(selected))} · 每账户最近 2000 笔成交",
+            "<table bordered compact>",
+            "<tr><td>方向</td><td>币种</td><td>价格区间</td><td>笔数/账户</td><td>成交额</td></tr>",
+        ]
+        for item in rows:
+            if item["max_px"] >= 1000:
+                price = f"{item['min_px']:,.0f} - {item['max_px']:,.0f}"
+            else:
+                price = f"{item['min_px']:,.2f} - {item['max_px']:,.2f}"
+            lines.append(
+                "<tr>"
+                f"<td>{item['side']}</td>"
+                f"<td>{item['coin']}</td>"
+                f"<td>{price}</td>"
+                f"<td>{item['fills']}笔/{item['accounts']}户</td>"
+                f"<td>{fmt_usd_cn(item['value'])}</td>"
+                "</tr>"
+            )
+        lines.append("</table>")
+        lines.append("价格接近的成交自动聚成区间；数据来自每个账户最近返回的成交记录。")
         return "\n".join(lines)
