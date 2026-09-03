@@ -4391,12 +4391,7 @@ class TelegramBot:
             return
         placeholder_id = self._send_loading(chat_id, "🔍 正在拉取自动账户成交并聚类…")
         def work():
-            try:
-                window_min = int(float(str(
-                    self.store.get_chat_setting(chat_id, f"fillzones_window:{proc}", "60")
-                ) or 60))
-            except (TypeError, ValueError):
-                window_min = 60
+            window_min = 0
             try:
                 rows, account_count = self._fetch_fillzones_rows(
                     proc, symbols, accounts, window_min=window_min
@@ -4624,12 +4619,14 @@ class TelegramBot:
 
     @staticmethod
     def _fillzones_window_label(window_min):
+        if int(window_min) == 0:
+            return "全部（最新 2000 笔）"
         return dict(FILL_WINDOWS).get(int(window_min), f"{int(window_min)}分钟")
 
     def _fillzones_keyboard(self, proc, view, window_min=60):
         rows = []
         current = []
-        for minutes, label in FILL_WINDOWS:
+        for minutes, label in [(0, "全部")] + list(FILL_WINDOWS):
             btn_text = f"✅ {label}" if int(minutes) == int(window_min) else label
             current.append(
                 {"text": btn_text, "callback_data": f"fzw:{proc}:{minutes}"}
@@ -4671,7 +4668,7 @@ class TelegramBot:
             int(time.time() * 1000),
         )
         try:
-            window_min = int(float(str(self.store.get_chat_setting(chat_id, f"fillzones_window:{proc}", "60"))))
+            window_min = int(float(str(self.store.get_chat_setting(chat_id, f"fillzones_window:{proc}", "0"))))
         except (TypeError, ValueError):
             window_min = 60
         text = self._format_fillzones_view(
