@@ -1734,6 +1734,14 @@ class TelegramBot:
             self.client.answer_callback_query(callback_id, "没有权限。")
             return
 
+        if data.startswith("fz:"):
+            self._handle_fillzones_view_callback(
+                callback_id,
+                chat_id,
+                message_id,
+                data,
+            )
+            return
         if data.startswith("hq:"):
             self._handle_hunt_pick_callback(
                 callback_id,
@@ -4327,6 +4335,11 @@ class TelegramBot:
 
     # ---------- auto account fill zones ----------
 
+
+
+    def _fillzones_ctx_key(self, proc):
+        return f"fillzones_rows:{proc}"
+
     def _cmd_fillzones(self, chat_id, args):
         names = self._autohunt_names(chat_id)
         if not names:
@@ -4371,20 +4384,61 @@ class TelegramBot:
         placeholder_id = self._send_loading(chat_id, "🔍 正在拉取自动账户成交并聚类…")
         def work():
             try:
-                text = self._build_auto_fillzones_report(chat_id, proc, symbols, accounts)
+                rows, account_count = self._fetch_fillzones_rows(proc, symbols, accounts)
             except Exception as exc:
                 print(f"[fillzones] report failed: {exc}")
                 text = f"成交区统计失败: {exc}"
+                if placeholder_id is not None:
+                    try:
+                        self.client.edit_message_text(chat_id, placeholder_id, text)
+                    except Exception:
+                        self.client.send_message(chat_id, text)
+                else:
+                    self.client.send_message(chat_id, text)
+                return
+            if not rows:
+                scope = "、".join(sorted(symbols))
+                text = f"进程 {proc}：这些自动账户近期在 {scope} 上没有可聚类的成交。"
+                if placeholder_id is not None:
+                    try:
+                        self.client.edit_message_text(chat_id, placeholder_id, text)
+                    except Exception:
+                        self.client.send_message(chat_id, text)
+                else:
+                    self.client.send_message(chat_id, text)
+                return
+            now_ms = int(time.time() * 1000)
+            self.store.set_chat_setting(chat_id, self._fillzones_ctx_key(proc), json.dumps(rows), now_ms)
+            self.store.set_chat_setting(
+                chat_id,
+                f"fillzones_symbols:{proc}",
+                json.dumps(sorted(symbols), ensure_ascii=False),
+                now_ms,
+            )
+            view = str(self.store.get_chat_setting(chat_id, f"fillzones_view:{proc}", "table") or "table")
+            text = self._format_fillzones_view(proc, symbols, rows, account_count, view)
+            keyboard = self._fillzones_keyboard(proc, view)
             if placeholder_id is not None:
                 try:
-                    self.client.edit_message_text(chat_id, placeholder_id, text, parse_mode="HTML")
+                    self.client.edit_message_text(
+                        chat_id,
+                        placeholder_id,
+                        text,
+                        reply_markup=keyboard,
+                        parse_mode="HTML",
+                    )
+                    return
                 except Exception:
-                    self.client.send_message(chat_id, text, parse_mode="HTML")
-            else:
-                self.client.send_message(chat_id, text, parse_mode="HTML")
+                    pass
+            self.client.send_message(
+                chat_id,
+                text,
+                reply_markup=keyboard,
+                parse_mode="HTML",
+            )
         threading.Thread(target=work, daemon=True).start()
 
-    def _build_auto_fillzones_report(self, chat_id, proc, symbols, accounts):
+    def _fetch_fillzones_rows(self, proc, symbols, accounts):
         selected = set(symbols)
         api = self.monitor.api
         workers = max(1, int(getattr(self.config.hunter, "scan_workers", 6)))
@@ -4427,9 +4481,6 @@ class TelegramBot:
             for account in accounts[:40]:
                 flat.extend(fetch_fills(account))
 
-        if not flat:
-            scope = "、".join(sorted(selected))
-            return f"进程 {proc}：这些自动账户近期在 {scope} 上没有成交记录。"
         clusters = _cluster_fills_by_price(flat)
         rows = []
         for cluster in clusters:
@@ -4447,33 +4498,123 @@ class TelegramBot:
                     "fills": len(cluster),
                     "accounts": len(accounts_in),
                     "value": total_value,
-                    "first_time": stat["first_time"],
-                    "last_time": stat["last_time"],
                 }
             )
         rows.sort(key=lambda item: (item["accounts"], item["value"]), reverse=True)
-        rows = rows[:12]
+        rows = rows[:20]
         account_count = len({str(a.get("address", "")) for a in accounts[:40]})
-        lines = [
-            f"<b>自动猎手 {proc} · 成交密集区间</b>",
-            f"统计账户：{account_count} 个 · 标的：{'、'.join(sorted(selected))} · 每账户最近 2000 笔成交",
-            "<table bordered compact>",
-            "<tr><td>方向</td><td>币种</td><td>价格区间</td><td>笔数/账户</td><td>成交额</td></tr>",
-        ]
-        for item in rows:
-            if item["max_px"] >= 1000:
-                price = f"{item['min_px']:,.0f} - {item['max_px']:,.0f}"
-            else:
-                price = f"{item['min_px']:,.2f} - {item['max_px']:,.2f}"
-            lines.append(
-                "<tr>"
-                f"<td>{item['side']}</td>"
-                f"<td>{item['coin']}</td>"
-                f"<td>{price}</td>"
-                f"<td>{item['fills']}笔/{item['accounts']}户</td>"
-                f"<td>{fmt_usd_cn(item['value'])}</td>"
-                "</tr>"
+        return rows, account_count
+
+    def _format_fillzones_view(self, proc, symbols, rows, account_count, view):
+        summary = f"统计账户：{account_count} 个 · 标的：{'、'.join(sorted(symbols))} · 每账户最近 2000 笔成交"
+        if view == "graph":
+            return self._format_fillzones_graph(proc, rows, summary)
+        return self._format_fillzones_table(proc, rows, summary)
+
+    def _format_fillzones_table(self, proc, rows, summary):
+        lines = [f"<b>自动猎手 {proc} · 成交密集区间（表格）</b>", summary]
+        for side in ("买入", "卖出"):
+            side_rows = sorted(
+                (r for r in rows if r["side"] == side),
+                key=lambda r: r["max_px"],
+                reverse=True,
             )
-        lines.append("</table>")
-        lines.append("价格接近的成交自动聚成区间；数据来自每个账户最近返回的成交记录。")
+            if not side_rows:
+                continue
+            lines.append(f"<b>{side}</b>")
+            lines.append("<table bordered compact>")
+            lines.append("<tr><td>币种</td><td>价格区间</td><td>笔数/账户</td><td>成交额</td></tr>")
+            for item in side_rows:
+                if item["max_px"] >= 1000:
+                    price = f"{item['min_px']:,.0f} - {item['max_px']:,.0f}"
+                else:
+                    price = f"{item['min_px']:,.2f} - {item['max_px']:,.2f}"
+                lines.append(
+                    "<tr>"
+                    f"<td>{item['coin']}</td>"
+                    f"<td>{price}</td>"
+                    f"<td>{item['fills']}笔/{item['accounts']}户</td>"
+                    f"<td>{fmt_usd_cn(item['value'])}</td>"
+                    "</tr>"
+                )
+            lines.append("</table>")
+        lines.append("区间按价格从高到低排列，买卖分开显示。")
         return "\n".join(lines)
+
+    def _format_fillzones_graph(self, proc, rows, summary):
+        lines = [
+            f"<b>自动猎手 {proc} · 成交密集区间（图形）</b>",
+            summary,
+        ]
+        for side in ("买入", "卖出"):
+            side_rows = sorted(
+                (r for r in rows if r["side"] == side),
+                key=lambda r: r["max_px"],
+                reverse=True,
+            )
+            if not side_rows:
+                continue
+            max_value = max(r["value"] for r in side_rows) or 1
+            width = 22
+            chart = [f"{side}（价格从高到低）"]
+            for item in side_rows:
+                bar_len = max(1, round(item["value"] / max_value * width))
+                if item["max_px"] >= 1000:
+                    price = f"{item['min_px']:,.0f}-{item['max_px']:,.0f}"
+                else:
+                    price = f"{item['min_px']:,.2f}-{item['max_px']:,.2f}"
+                bar = "-" * bar_len
+                chart.append(f"{item['coin']} {price} {bar} {fmt_usd_cn(item['value'])}")
+            lines.append("<pre>" + "\n".join(html.escape(row) for row in chart) + "</pre>")
+        return "\n".join(lines)
+
+    def _fillzones_keyboard(self, proc, view):
+        target = "graph" if view == "table" else "table"
+        label = "📈 图形视图" if view == "table" else "📊 表格视图"
+        return {
+            "inline_keyboard": [
+                [{"text": label, "callback_data": f"fz:{proc}:{target}"}]
+            ]
+        }
+
+    def _handle_fillzones_view_callback(self, callback_id, chat_id, message_id, data):
+        try:
+            _, proc, view = data.split(":", 2)
+        except ValueError:
+            self.client.answer_callback_query(callback_id)
+            return
+        raw_rows = self.store.get_chat_setting(chat_id, self._fillzones_ctx_key(proc), None)
+        raw_symbols = self.store.get_chat_setting(chat_id, f"fillzones_symbols:{proc}", None)
+        if not raw_rows or not raw_symbols:
+            self.client.answer_callback_query(callback_id, "请先重新运行 /fillzones。")
+            return
+        try:
+            rows = json.loads(raw_rows)
+            symbols = json.loads(raw_symbols)
+        except (TypeError, ValueError):
+            self.client.answer_callback_query(callback_id, "缓存已失效，请重新运行 /fillzones。")
+            return
+        account_count = len(
+            {str(a.get("address", "")) for a in self.store.get_auto_accounts(chat_id, proc)}
+        )
+        self.store.set_chat_setting(
+            chat_id,
+            f"fillzones_view:{proc}",
+            view,
+            int(time.time() * 1000),
+        )
+        text = self._format_fillzones_view(proc, symbols, rows, account_count, view)
+        keyboard = self._fillzones_keyboard(proc, view)
+        try:
+            self.client.edit_message_text(
+                chat_id,
+                message_id,
+                text,
+                reply_markup=keyboard,
+                parse_mode="HTML",
+            )
+        except Exception as exc:
+            print(f"[fillzones] view switch failed: {exc}")
+            self.client.answer_callback_query(callback_id, "切换失败，请重试。")
+            return
+        self.client.answer_callback_query(callback_id)
