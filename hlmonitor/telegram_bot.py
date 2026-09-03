@@ -32,7 +32,7 @@ from .state import EventStore
 HELP_TEXT = """Hyperliquid 地址监控 Bot
 
 /add 0x地址 [别名] - 添加监控地址
-/name 命名 0x地址 - 给已添加的地址设置显示名称
+/name 新名称 [0x地址/旧名称] - 命名或重命名；只发名称则改当前查看的地址
 /remove 0x地址 - 删除地址
 /removeall - 删除当前聊天的全部地址
 /list - 查看当前监控列表
@@ -300,6 +300,9 @@ def hunt_category_keyboard():
                 {"text": "其他币种", "callback_data": "hq:cat:other"},
                 {"text": "综合（全部）", "callback_data": "hq:all"},
             ],
+            [
+                {"text": "🔍 搜索标的", "callback_data": "hq:find"},
+            ],
         ]
     }
 
@@ -343,6 +346,11 @@ def hunt_coins_keyboard(category, coins, selected, page=0):
         [
             {"text": "全选", "callback_data": f"hq:{category}:a"},
             {"text": "清空", "callback_data": f"hq:{category}:c"},
+        ]
+    )
+    rows.append(
+        [
+            {"text": "🔍 搜索", "callback_data": "hq:find"},
         ]
     )
     rows.append(
@@ -1604,6 +1612,26 @@ class TelegramBot:
                 )
                 self._run_hunt(chat_id, limit, self._load_hunt_filter(chat_id))
                 return
+        pending_search = self.store.get_chat_setting(
+            chat_id,
+            "pending_hunt_search",
+            None,
+        )
+        if pending_search:
+            first_word = (
+                text.split(maxsplit=1)[0].split("@", 1)[0].lower()
+                if text
+                else ""
+            )
+            if first_word == "/skip":
+                self._clear_hunt_search(chat_id)
+                self.client.send_message(chat_id, "已取消搜索。")
+                return
+            if text.startswith("/"):
+                self._clear_hunt_search(chat_id)
+            else:
+                self._show_hunt_search_results(chat_id, text)
+                return
         pending_address = self.store.get_chat_setting(
             chat_id,
             f"pending_alias:{chat_id}",
@@ -2306,24 +2334,43 @@ class TelegramBot:
 
     def _cmd_name(self, chat_id, args):
         parts = args.strip().split(maxsplit=1)
-        if len(parts) != 2 or not parts[0].strip() or not parts[1].strip():
-            self.client.send_message(chat_id, "用法: /name 命名 0x地址")
+        if not parts or not parts[0].strip():
+            self.client.send_message(
+                chat_id,
+                "用法: /name 新名称 [0x地址或旧名称]\n"
+                "只发一个名称时，会改名当前正在查看的地址（例如 /status 选中的那个）。",
+            )
             return
         alias = parts[0].strip()
-        try:
-            address = normalize_address(parts[1].strip())
-        except ValueError as exc:
-            self.client.send_message(chat_id, f"地址无效: {exc}")
-            return
-
+        if len(parts) > 1 and parts[1].strip():
+            address = self._resolve_address(chat_id, parts[1].strip())
+            if not address:
+                self.client.send_message(
+                    chat_id,
+                    "找不到该地址或旧名称，请先用 /list 查看，或直接发 0x 地址。",
+                )
+                return
+        else:
+            address = self.store.get_chat_setting(
+                chat_id,
+                "selected_brief_address",
+                None,
+            )
+            if not address:
+                self.client.send_message(
+                    chat_id,
+                    "当前没有正在查看的地址，请带上 0x 地址或旧名称。",
+                )
+                return
         subscriptions = self.store.get_subscriptions(
             chat_id=chat_id,
             active_only=False,
         )
-        if address not in {sub["address"] for sub in subscriptions}:
-            self.client.send_message(chat_id, "该地址尚未添加，请先使用 /add。")
+        if str(address).lower() not in {
+            str(sub["address"]).lower() for sub in subscriptions
+        }:
+            self.client.send_message(chat_id, "该地址尚未添加，请先订阅或使用 /add。")
             return
-
         self.store.set_subscription_alias(
             chat_id,
             address,
@@ -2552,10 +2599,89 @@ class TelegramBot:
             int(time.time() * 1000),
         )
 
+    def _clear_hunt_search(self, chat_id):
+        now_ms = int(time.time() * 1000)
+        prompt_id = self.store.get_chat_setting(chat_id, "hunt_search_prompt", None)
+        if prompt_id:
+            try:
+                self.client.delete_message(chat_id, int(prompt_id))
+            except Exception:
+                pass
+        self.store.set_chat_setting(chat_id, "pending_hunt_search", None, now_ms)
+        self.store.set_chat_setting(chat_id, "hunt_search_query", None, now_ms)
+        self.store.set_chat_setting(chat_id, "hunt_search_prompt", None, now_ms)
+
+    def _ask_hunt_search(self, chat_id):
+        now_ms = int(time.time() * 1000)
+        self.store.set_chat_setting(chat_id, "pending_hunt_search", "1", now_ms)
+        result = self.client.send_message(
+            chat_id,
+            "🔍 直接回复要搜索的标的名称（支持关键字，如 GOLD / TSLA / XYZ），或 /skip 取消。",
+        )
+        prompt_id = (result or {}).get("message_id")
+        if prompt_id is not None:
+            self.store.set_chat_setting(
+                chat_id,
+                "hunt_search_prompt",
+                str(prompt_id),
+                now_ms,
+            )
+
+    def _hunt_search_symbols(self, query):
+        query = str(query or "").strip().lower()
+        if not query:
+            return []
+        found = set()
+        for coin in self._get_hunt_coins():
+            coin = str(coin)
+            if query in coin.lower():
+                symbol = coin.rsplit(":", 1)[-1].upper() if ":" in coin else coin.upper()
+                found.add(symbol)
+        for symbol in self._get_hunt_symbols():
+            if query in symbol.lower():
+                found.add(symbol)
+        return sorted(found)
+
+    def _show_hunt_search_results(self, chat_id, query):
+        now_ms = int(time.time() * 1000)
+        self.store.set_chat_setting(chat_id, "pending_hunt_search", None, now_ms)
+        matches = self._hunt_search_symbols(query)
+        prompt_id = self.store.get_chat_setting(chat_id, "hunt_search_prompt", None)
+        if not matches:
+            self.store.set_chat_setting(chat_id, "hunt_search_query", None, now_ms)
+            text = f"没有找到匹配 “{query.strip()}” 的标的，试试 GOLD / TSLA / XYZ 这类关键字。"
+            if prompt_id:
+                try:
+                    self.client.edit_message_text(chat_id, int(prompt_id), text)
+                    return
+                except Exception:
+                    pass
+            self.client.send_message(chat_id, text)
+            return
+        self.store.set_chat_setting(chat_id, "hunt_search_query", str(query).strip(), now_ms)
+        symbols = self._get_hunt_symbols()
+        selected = self._get_hunt_selected(chat_id, symbols)
+        sel_count = len(selected & set(matches))
+        text = f"搜索结果 “{query.strip()}”：已选 {sel_count}/{len(matches)}，可多选"
+        keyboard = hunt_coins_keyboard("search", matches, selected)
+        if prompt_id:
+            try:
+                self.client.edit_message_text(
+                    chat_id,
+                    int(prompt_id),
+                    text,
+                    reply_markup=keyboard,
+                )
+                return
+            except Exception:
+                pass
+        self.client.send_message(chat_id, text, reply_markup=keyboard)
+
     def _clear_hunt_pending(self, chat_id):
         now_ms = int(time.time() * 1000)
         self.store.set_chat_setting(chat_id, "pending_hunt_limit", None, now_ms)
         self.store.set_chat_setting(chat_id, "hunt_sel", None, now_ms)
+        self._clear_hunt_search(chat_id)
 
     def _hunt_category_coins(self, category, coins):
         # Classify by the symbol after any dex prefix (xyz:GOLD -> GOLD),
@@ -2696,6 +2822,10 @@ class TelegramBot:
             )
             self.client.answer_callback_query(callback_id)
             return
+        if head == "find":
+            self._ask_hunt_search(chat_id)
+            self.client.answer_callback_query(callback_id)
+            return
         if head == "all":
             self._set_hunt_selected(chat_id, set())
             self._ask_hunt_limit(chat_id, [])
@@ -2707,37 +2837,46 @@ class TelegramBot:
             return
         if head == "cat" and len(parts) >= 3:
             category = parts[2]
+            action = ""
             page = 0
         else:
             category = head
             action = parts[2] if len(parts) > 2 else ""
-            if action == "t" and len(parts) >= 5:
+            page = 0
+            if action == "n" and len(parts) >= 4:
                 page = int(parts[3])
-                coin = ":".join(parts[4:])
-                if coin in selected:
-                    selected.discard(coin)
-                else:
-                    selected.add(coin)
-            elif action == "n" and len(parts) >= 4:
-                page = int(parts[3])
-            elif action == "a":
-                page = 0
-                selected.update(self._hunt_category_coins(category, coins))
-            elif action == "c":
-                page = 0
-                selected.difference_update(self._hunt_category_coins(category, coins))
-            else:
-                self.client.answer_callback_query(callback_id)
-                return
 
-        if category not in {"main", "metal", "stocks", "other"}:
+        if category not in {"main", "metal", "stocks", "other", "search"}:
+            self.client.answer_callback_query(callback_id)
+            return
+
+        if category == "search":
+            query = str(self.store.get_chat_setting(chat_id, "hunt_search_query", "") or "")
+            category_coins = self._hunt_search_symbols(query)
+        else:
+            category_coins = self._hunt_category_coins(category, coins)
+
+        if action == "t" and len(parts) >= 5:
+            page = int(parts[3])
+            coin = ":".join(parts[4:])
+            if coin in selected:
+                selected.discard(coin)
+            else:
+                selected.add(coin)
+        elif action == "a":
+            selected.update(category_coins)
+        elif action == "c":
+            selected.difference_update(category_coins)
+        elif action not in {"", "n"}:
             self.client.answer_callback_query(callback_id)
             return
 
         self._set_hunt_selected(chat_id, selected)
-        category_coins = self._hunt_category_coins(category, coins)
         if not category_coins:
-            text = f"{self._category_label(category)}：当前没有可用标的。"
+            if category == "search":
+                text = "没有找到匹配的标的，点击 🔍 可重新搜索。"
+            else:
+                text = f"{self._category_label(category)}：当前没有可用标的。"
             keyboard = {
                 "inline_keyboard": [
                     [{"text": "返回分类", "callback_data": "hq:back"}]
@@ -2745,10 +2884,16 @@ class TelegramBot:
             }
         else:
             sel_in_cat = selected & set(category_coins)
-            text = (
-                f"选择 {self._category_label(category)}（已选 "
-                f"{len(sel_in_cat)}/{len(category_coins)}，可多选）"
-            )
+            if category == "search":
+                text = (
+                    f"搜索结果 “{query}”：已选 "
+                    f"{len(sel_in_cat)}/{len(category_coins)}，可多选"
+                )
+            else:
+                text = (
+                    f"选择 {self._category_label(category)}（已选 "
+                    f"{len(sel_in_cat)}/{len(category_coins)}，可多选）"
+                )
             keyboard = hunt_coins_keyboard(
                 category,
                 category_coins,
