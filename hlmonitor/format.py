@@ -1,24 +1,30 @@
 """格式化与展示辅助函数。"""
 
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
+
+CN_TZ = timezone(timedelta(hours=8), name="UTC+8")
 
 
 def fmt_time(ms):
-    """毫秒时间戳 -> 本地时间字符串。"""
+    """毫秒时间戳 -> UTC+8 时间字符串。"""
     if ms is None:
         return "-"
     try:
-        return datetime.fromtimestamp(ms / 1000).strftime("%Y-%m-%d %H:%M:%S")
+        return datetime.fromtimestamp(ms / 1000, tz=CN_TZ).strftime(
+            "%Y-%m-%d %H:%M:%S"
+        )
     except (OverflowError, OSError, ValueError):
         return str(ms)
 
 
 def fmt_time_min(ms):
-    """毫秒时间戳 -> 本地时间字符串（精确到分钟）。"""
+    """毫秒时间戳 -> UTC+8 时间字符串（精确到分钟）。"""
     if ms is None:
         return "-"
     try:
-        return datetime.fromtimestamp(ms / 1000).strftime("%m-%d %H:%M")
+        return datetime.fromtimestamp(ms / 1000, tz=CN_TZ).strftime(
+            "%m-%d %H:%M"
+        )
     except (OverflowError, OSError, ValueError):
         return str(ms)
 
