@@ -83,6 +83,7 @@ class HunterConfig:
     swing_min_move_pct: float = 1.5
     swing_min_funding_pct: float = 0.1
     auto_skip_hours: float = 12.0              # autohunt 跳过最近多少小时内已扫过的地址
+    scan_workers: int = 6                    # autohunt/hunt 精算时并行拉取的线程数
     candidates: int = 150                  # 从合格账户中随机抽取精算的数量（不再按净值取前 N）
     top_n: int = 10                        # 最终收集数量
 
@@ -237,6 +238,7 @@ def load_config(path: str | os.PathLike | None = None) -> Config:
         auto_skip_hours=max(
             0.5, _as_float(hunter_data.get("auto_skip_hours", 12.0), 12.0)
         ),
+        scan_workers=max(1, min(32, _as_int(hunter_data.get("scan_workers", 6), 6))),
         candidates=max(1, _as_int(hunter_data.get("candidates", 150), 150)),
         top_n=max(1, _as_int(hunter_data.get("top_n", 10), 10)),
     )

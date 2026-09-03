@@ -6,6 +6,7 @@ import html
 import json
 import math
 import random
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import threading
 import time
 import urllib.parse
@@ -269,18 +270,17 @@ def scan(config, api, progress=None, coins=None, swing_mode=None, max_results=No
     if scanned_out is not None:
         scanned_out.extend(c["address"] for c in candidates)
 
-    results = []
-    for index, cand in enumerate(candidates, 1):
-        if progress:
-            progress(index, len(candidates), cand["address"])
+    workers = max(1, int(getattr(hunter, "scan_workers", 6)))
+    symbol_set = None
+    if coins:
+        symbol_set = {str(c).rsplit(":", 1)[-1].upper() for c in coins}
+
+    def process_candidate(cand):
         try:
             fills = api.user_fills(cand["address"]) or []
         except Exception:
             fills = []
-        if coins:
-            symbol_set = {
-                str(c).rsplit(":", 1)[-1].upper() for c in coins
-            }
+        if symbol_set:
             fills = [
                 fill
                 for fill in fills
@@ -289,13 +289,13 @@ def scan(config, api, progress=None, coins=None, swing_mode=None, max_results=No
             ]
         stats = _fill_win_stats(fills)
         if stats["sample_size"] < 1:
-            continue
+            return None
         if stats["weighted_win_rate"] < hunter.min_win_rate:
-            continue
+            return None
         if swing:
             profile = _swing_profile(api, cand["address"], coins, dex_map, hunter)
             if not profile["ok"]:
-                continue
+                return None
             cand["swing_hits"] = len(profile["positions"])
         score = (
             stats["weighted_win_rate"]
@@ -305,8 +305,34 @@ def scan(config, api, progress=None, coins=None, swing_mode=None, max_results=No
         cand.update(stats)
         cand["score"] = score
         cand["scanned_at"] = int(time.time() * 1000)
-        results.append(cand)
+        return cand
 
+    results = []
+    if workers > 1 and len(candidates) > 1:
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            futures = {
+                pool.submit(process_candidate, cand): cand for cand in candidates
+            }
+            done = 0
+            for future in as_completed(futures):
+                done += 1
+                cand = futures[future]
+                if progress:
+                    progress(done, len(candidates), cand["address"])
+                try:
+                    item = future.result()
+                except Exception as exc:
+                    print(f"[hunter] candidate scan failed: {exc}")
+                    continue
+                if item:
+                    results.append(item)
+    else:
+        for index, cand in enumerate(candidates, 1):
+            if progress:
+                progress(index, len(candidates), cand["address"])
+            item = process_candidate(cand)
+            if item:
+                results.append(item)
     results.sort(key=lambda item: item["score"], reverse=True)
     cap = hunter.top_n if max_results is None else max(1, int(max_results))
     return results[:cap]

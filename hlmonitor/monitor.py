@@ -755,15 +755,25 @@ class AddressMonitor:
                 pos["peak_notional"] = pos.get("notional", 0)
         return positions
 
-    def _fetch_fill_history(self, address):
+    def _fetch_fill_history(self, address, lookback_days=180):
         now = int(time.time() * 1000)
+        start = now - int(lookback_days) * 86400000
         end = now + 1000
         fills = []
         for _ in range(8):
-            try:
-                batch = self.api.user_fills_by_time(address, 0, end) or []
-            except Exception as exc:
-                print(f"[fills] 拉取成交历史失败 ({short_addr(address)}): {exc}")
+            batch = None
+            last_exc = None
+            for attempt in range(3):
+                try:
+                    batch = self.api.user_fills_by_time(address, start, end) or []
+                    break
+                except Exception as exc:
+                    last_exc = exc
+                    time.sleep(0.8 * (attempt + 1))
+            if batch is None:
+                print(
+                    f"[fills] 拉取成交历史失败 ({short_addr(address)}): {last_exc}"
+                )
                 break
             if not batch:
                 break
