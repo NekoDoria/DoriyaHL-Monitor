@@ -44,16 +44,13 @@ HELP_TEXT = """Hyperliquid 地址监控 Bot
 /removeall - 删除当前聊天的全部地址
 /list - 查看当前监控列表
 /status [0x地址] - 查询当前账户/持仓状态
-/stats [0x地址] - 打开或刷新成交统计面板
+/stats [0x地址] - 查看成交统计；/stats hunt 进程名 [标的] 看自动收集账户的成交密集区
 /history [0x地址] - 查看历史持仓（来自最近成交记录）
 /tpsl [0x地址] - 查看当前挂着的止盈止损单
-/orders [0x地址] - 查看普通挂单：先选账户，再选标的，价格相近的会合并成密集区间
+/orders [0x地址] - 查看普通挂单；/orders hunt 进程名 [标的] 看自动收集账户的挂单密集区
 /recent [条数] - 查看最近事件
-/hunt [数量] - 先选择要统计的标的（或综合），再输入数量扫描大户
+/hunt [数量] - 扫描大户；/hunt auto … 管理后台自动收集（new/list/on/off/now/progress/del）
 /huntlist - 查看已收集的大户账户（可一键加入监控）
-/autohunt - 设置后台自动收集大户（可选标的、每轮数量与间隔）
-/zones [标的] - 查看自动收集账户在所选标的上的挂单密集区
-/fillzones [进程名] [标的] - 查看自动收集账户的成交密集区间
 /coins - 选择要接收交易通知的币种
 /mute - 暂停当前聊天的告警
 /unmute - 恢复当前聊天的告警
@@ -2351,13 +2348,19 @@ class TelegramBot:
         elif command == "/status":
             self._cmd_status(chat_id, args)
         elif command == "/stats":
-            self._cmd_stats(chat_id, args)
+            if args.strip().lower().startswith("hunt"):
+                self._cmd_fillzones(chat_id, args.strip()[4:].strip())
+            else:
+                self._cmd_stats(chat_id, args)
         elif command == "/history":
             self._cmd_history(chat_id, args)
         elif command == "/tpsl":
             self._cmd_tpsl(chat_id, args)
         elif command == "/hunt":
-            self._cmd_hunt(chat_id, args)
+            if args.strip().lower().startswith("auto"):
+                self._cmd_autohunt(chat_id, args.strip()[4:].strip())
+            else:
+                self._cmd_hunt(chat_id, args)
         elif command == "/huntlist":
             self._cmd_huntlist(chat_id)
         elif command == "/autohunt":
@@ -2367,7 +2370,10 @@ class TelegramBot:
         elif command == "/fillzones":
             self._cmd_fillzones(chat_id, args)
         elif command == "/orders":
-            self._cmd_orders(chat_id, args)
+            if args.strip().lower().startswith("hunt"):
+                self._cmd_zones(chat_id, args.strip()[4:].strip())
+            else:
+                self._cmd_orders(chat_id, args)
         elif command == "/recent":
             self._cmd_recent(chat_id, args)
         elif command == "/coins":
