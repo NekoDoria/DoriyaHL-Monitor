@@ -5,6 +5,7 @@ from __future__ import annotations
 import html
 import json
 import math
+import random
 import threading
 import time
 import urllib.parse
@@ -149,8 +150,12 @@ def scan(config, api, progress=None, coins=None):
                 "roi": perf["roi"],
             }
         )
-    candidates.sort(key=lambda item: item["account_value"], reverse=True)
-    candidates = candidates[: hunter.candidates]
+    # Don't take the top N by account value. Everyone above the size/activity
+    # filters is eligible, and we sample a batch so the final ranking is decided
+    # by the weighted win rate computed from real fills, not by net worth.
+    sample_count = max(int(hunter.candidates), 1)
+    if len(candidates) > sample_count:
+        candidates = random.sample(candidates, sample_count)
 
     results = []
     for index, cand in enumerate(candidates, 1):

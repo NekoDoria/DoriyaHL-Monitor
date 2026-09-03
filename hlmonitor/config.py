@@ -78,7 +78,7 @@ class HunterConfig:
     min_pnl: float = 0.0                   # 全时段盈亏下限（USD）
     min_roi: float = 0.0                   # 全时段收益率下限
     min_win_rate: float = 0.50             # 加权胜率下限（0-1）
-    candidates: int = 40                   # 粗筛后精算胜率的候选数
+    candidates: int = 150                  # 从合格账户中随机抽取精算的数量（不再按净值取前 N）
     top_n: int = 10                        # 最终收集数量
 
 
