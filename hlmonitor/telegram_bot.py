@@ -2525,7 +2525,14 @@ class TelegramBot:
             return None
         if not isinstance(coins, list) or not coins:
             return None
-        return [str(c).upper() for c in coins]
+        out = []
+        for c in coins:
+            c = str(c).upper()
+            if ":" in c:
+                c = c.rsplit(":", 1)[-1]
+            if c not in out:
+                out.append(c)
+        return out
 
     def _get_hunt_selected(self, chat_id, coins):
         raw = self.store.get_chat_setting(chat_id, "hunt_sel", None)
@@ -2670,7 +2677,7 @@ class TelegramBot:
 
     def _handle_hunt_pick_callback(self, callback_id, chat_id, message_id, data):
         try:
-            coins = self._get_hunt_coins()
+            coins = self._get_hunt_symbols()
         except Exception as exc:
             self.client.answer_callback_query(callback_id, f"获取标的失败: {exc}")
             return
@@ -3494,6 +3501,16 @@ class TelegramBot:
         self._hunt_universe_cache = out
         self._hunt_universe_cache_at = now
         return out
+
+    def _get_hunt_symbols(self):
+        """Dedupe the hunt universe by bare symbol for the picker."""
+        symbols = set()
+        for coin in self._get_hunt_coins():
+            coin = str(coin).upper()
+            if ":" in coin:
+                coin = coin.rsplit(":", 1)[-1]
+            symbols.add(coin)
+        return sorted(symbols)
 
     def _get_selected_coins(self, chat_id, coins):
         raw = self.store.get_chat_setting(chat_id, "notify_coins", None)

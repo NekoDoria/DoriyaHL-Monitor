@@ -161,11 +161,14 @@ def scan(config, api, progress=None, coins=None):
         except Exception:
             fills = []
         if coins:
-            coin_set = {str(c).upper() for c in coins}
+            symbol_set = {
+                str(c).rsplit(":", 1)[-1].upper() for c in coins
+            }
             fills = [
                 fill
                 for fill in fills
-                if str(fill.get("coin") or "").upper() in coin_set
+                if str(fill.get("coin") or "").rsplit(":", 1)[-1].upper()
+                in symbol_set
             ]
         stats = _fill_win_stats(fills)
         if stats["sample_size"] < 1:
