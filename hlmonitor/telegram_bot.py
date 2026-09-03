@@ -38,27 +38,40 @@ from .state import EventStore
 
 HELP_TEXT = """Hyperliquid 地址监控 Bot
 
-/add 0x地址 [别名] - 添加监控地址
-/name 新名称 [0x地址/旧名称] - 命名或重命名；只发名称则改当前查看的地址
-/remove 0x地址 - 删除地址
-/removeall - 删除当前聊天的全部地址
-/list - 查看当前监控列表
-/status [0x地址] - 查询当前账户/持仓状态
-/stats [0x地址] - 查看成交统计；/stats hunt 进程名 [标的] 看自动收集账户的成交密集区
-/history [0x地址] - 查看历史持仓（来自最近成交记录）
-/tpsl [0x地址] - 查看当前挂着的止盈止损单
-/orders [0x地址] - 查看普通挂单；/orders hunt 进程名 [标的] 看自动收集账户的挂单密集区
-/recent [条数] - 查看最近事件
-/hunt [数量] - 扫描大户；/hunt auto … 管理后台自动收集（new/list/on/off/now/progress/del）
-/huntlist - 查看已收集的大户账户（可一键加入监控）
-/coins - 选择要接收交易通知的币种
-/mute - 暂停当前聊天的告警
-/unmute - 恢复当前聊天的告警
-/help - 显示本帮助
+基础命令
+/add 0x地址 [别名] — 添加监控
+/name 新名称 [0x地址或旧名称] — 命名/重命名
+/remove 0x地址 — 删除监控
+/removeall — 清空当前聊天监控
+/list — 监控列表
+/status [0x地址] — 账户/持仓
+/stats [0x地址] — 成交统计
+/history [0x地址] — 持仓历史
+/tpsl [0x地址] — 止盈止损单
+/orders [0x地址] — 普通挂单密集区间
+/recent [条数] — 最近事件
 
+Hunt 系列
+/hunt [数量] — 手动扫描大户（可先选标的）
+/hunt auto new 名称 — 新建后台自动收集
+/hunt auto list — 查看所有进程
+/hunt auto on|off|now|del 名称 — 启动/停止/立即跑/删除
+/hunt auto progress 名称 — 查看进度条
+/stats hunt 名称 [标的] — 自动账户成交密集区间
+/orders hunt 名称 [标的] — 自动账户挂单密集区
+/huntlist — 已收集大户账户
+
+其他
+/coins — 选择成交通知币种
+/mute — 暂停当前聊天告警
+/unmute — 恢复当前聊天告警
+/help — 显示本帮助
+
+提示：只有一个自动进程时，/hunt auto 后可省略名称。
 告警会自动发送到添加地址时所在的聊天。
-持仓简报下方有按钮，可直接切换按仓位价值或按开仓时间排序。
-成交通知会自动汇总为多档周期（5分钟/15分钟/1小时/4小时/1天/3天/1周），并在同一条实时消息中刷新。"""
+持仓简报下方有按钮，可切换按仓位价值或开仓时间排序。
+成交通知会自动汇总为多档周期（5分钟/15分钟/1小时/4小时/1天/3天/1周）。"""
+
 
 
 def address_selector_rows(subscriptions, selected_address=None, prefix="as"):
