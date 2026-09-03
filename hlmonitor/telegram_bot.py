@@ -4511,34 +4511,42 @@ class TelegramBot:
             return self._format_fillzones_graph(proc, rows, summary)
         return self._format_fillzones_table(proc, rows, summary)
 
+    @staticmethod
+    def _fill_side_marker(side):
+        return "🟢" if str(side) == "买入" else "🔴"
+
     def _format_fillzones_table(self, proc, rows, summary):
         lines = [f"<b>自动猎手 {proc} · 成交密集区间（表格）</b>", summary]
-        for side in ("买入", "卖出"):
-            side_rows = sorted(
-                (r for r in rows if r["side"] == side),
+        coins = list(dict.fromkeys(r["coin"] for r in rows))
+        for coin in coins:
+            coin_rows = sorted(
+                (r for r in rows if r["coin"] == coin),
                 key=lambda r: r["max_px"],
                 reverse=True,
             )
-            if not side_rows:
+            if not coin_rows:
                 continue
-            lines.append(f"<b>{side}</b>")
+            lines.append(f"<b>{coin}</b>")
             lines.append("<table bordered compact>")
-            lines.append("<tr><td>币种</td><td>价格区间</td><td>笔数/账户</td><td>成交额</td></tr>")
-            for item in side_rows:
+            lines.append(
+                "<tr><td></td><td>价格区间</td><td>笔数/账户</td><td>成交额</td></tr>"
+            )
+            for item in coin_rows:
+                marker = self._fill_side_marker(item["side"])
                 if item["max_px"] >= 1000:
                     price = f"{item['min_px']:,.0f} - {item['max_px']:,.0f}"
                 else:
                     price = f"{item['min_px']:,.2f} - {item['max_px']:,.2f}"
                 lines.append(
                     "<tr>"
-                    f"<td>{item['coin']}</td>"
+                    f"<td>{marker}</td>"
                     f"<td>{price}</td>"
                     f"<td>{item['fills']}笔/{item['accounts']}户</td>"
                     f"<td>{fmt_usd_cn(item['value'])}</td>"
                     "</tr>"
                 )
             lines.append("</table>")
-        lines.append("区间按价格从高到低排列，买卖分开显示。")
+        lines.append("🟢 = 买入 · 🔴 = 卖出；每个标的内按价格从高到低排列。")
         return "\n".join(lines)
 
     def _format_fillzones_graph(self, proc, rows, summary):
@@ -4546,26 +4554,30 @@ class TelegramBot:
             f"<b>自动猎手 {proc} · 成交密集区间（图形）</b>",
             summary,
         ]
-        for side in ("买入", "卖出"):
-            side_rows = sorted(
-                (r for r in rows if r["side"] == side),
+        coins = list(dict.fromkeys(r["coin"] for r in rows))
+        for coin in coins:
+            coin_rows = sorted(
+                (r for r in rows if r["coin"] == coin),
                 key=lambda r: r["max_px"],
                 reverse=True,
             )
-            if not side_rows:
+            if not coin_rows:
                 continue
-            max_value = max(r["value"] for r in side_rows) or 1
+            lines.append(f"<b>{coin}</b>")
+            max_value = max(r["value"] for r in coin_rows) or 1
             width = 22
-            chart = [f"{side}（价格从高到低）"]
-            for item in side_rows:
+            chart = []
+            for item in coin_rows:
                 bar_len = max(1, round(item["value"] / max_value * width))
                 if item["max_px"] >= 1000:
                     price = f"{item['min_px']:,.0f}-{item['max_px']:,.0f}"
                 else:
                     price = f"{item['min_px']:,.2f}-{item['max_px']:,.2f}"
+                marker = self._fill_side_marker(item["side"])
                 bar = "-" * bar_len
-                chart.append(f"{item['coin']} {price} {bar} {fmt_usd_cn(item['value'])}")
+                chart.append(f"{marker} {price} {bar} | {fmt_usd_cn(item['value'])}")
             lines.append("<pre>" + "\n".join(html.escape(row) for row in chart) + "</pre>")
+        lines.append("🟢 = 买入 · 🔴 = 卖出；每个标的内按价格从高到低排列。")
         return "\n".join(lines)
 
     def _fillzones_keyboard(self, proc, view):
