@@ -1658,31 +1658,43 @@ class TelegramBot:
             None,
         )
         if pending_auto_params:
+            proc = str(self.store.get_chat_setting(chat_id, "pending_autohunt_name", "") or "")
+            now_ms = int(time.time() * 1000)
+            if not proc:
+                self.store.set_chat_setting(chat_id, "pending_autohunt_params", None, now_ms)
+                self.client.send_message(chat_id, "设置进程名丢失，请重新 /autohunt new 名称。")
+                return
             if text.lower().startswith("/skip"):
-                self.store.set_chat_setting(chat_id, "pending_autohunt_params", None, int(time.time() * 1000))
+                self.store.set_chat_setting(chat_id, "pending_autohunt_params", None, now_ms)
+                self.store.set_chat_setting(chat_id, "pending_autohunt_name", None, now_ms)
                 self.client.send_message(chat_id, "已取消设置。")
                 return
-            raw = text.replace(",", " ").split()
-            try:
-                limit = int(float(raw[0])) if raw else 20
-                interval_h = float(raw[1]) if len(raw) > 1 else 6.0
-            except (ValueError, IndexError):
-                limit = None
-            if limit is None or limit < 0 or interval_h <= 0:
-                self.client.send_message(chat_id, "格式不对，请回复两个数字：每轮数量 间隔小时，例如 20 6。")
+            if text.startswith("/"):
+                self.store.set_chat_setting(chat_id, "pending_autohunt_params", None, now_ms)
+                self.store.set_chat_setting(chat_id, "pending_autohunt_name", None, now_ms)
+            else:
+                raw = text.replace(",", " ").split()
+                try:
+                    limit = int(float(raw[0])) if raw else 20
+                    interval_h = float(raw[1]) if len(raw) > 1 else 6.0
+                except (ValueError, IndexError):
+                    limit = None
+                if limit is None or limit < 0 or interval_h <= 0:
+                    self.client.send_message(chat_id, "格式不对，请回复两个数字：每轮数量 间隔小时，例如 20 6。")
+                    return
+                key = self._auto_key(proc, "limit")
+                self.store.set_chat_setting(chat_id, key, str(int(limit)), now_ms)
+                self.store.set_chat_setting(chat_id, self._auto_key(proc, "interval_h"), str(float(interval_h)), now_ms)
+                self.store.set_chat_setting(chat_id, self._auto_key(proc, "enabled"), "1", now_ms)
+                self.store.set_chat_setting(chat_id, self._auto_key(proc, "last_run"), "0", now_ms)
+                self.store.set_chat_setting(chat_id, "pending_autohunt_params", None, now_ms)
+                self.store.set_chat_setting(chat_id, "pending_autohunt_name", None, now_ms)
+                self.client.send_message(
+                    chat_id,
+                    f"✔ 进程 {proc} 已启动：每轮收集 {int(limit)} 个，每 {float(interval_h):g} 小时跑一次。\n"
+                    f"可用 /autohunt list 查看，/autohunt off {proc} 停止，/zones {proc} 查看挂单区。",
+                )
                 return
-            now_ms = int(time.time() * 1000)
-            self.store.set_chat_setting(chat_id, "autohunt_limit", str(int(limit)), now_ms)
-            self.store.set_chat_setting(chat_id, "autohunt_interval_h", str(float(interval_h)), now_ms)
-            self.store.set_chat_setting(chat_id, "autohunt_enabled", "1", now_ms)
-            self.store.set_chat_setting(chat_id, "autohunt_last_run", "0", now_ms)
-            self.store.set_chat_setting(chat_id, "pending_autohunt_params", None, now_ms)
-            self.client.send_message(
-                chat_id,
-                f"✔ 自动猎手已启动：每轮收集 {int(limit)} 个，每 {float(interval_h):g} 小时跑一次。\n"
-                f"可用 /autohunt list 查看状态，/autohunt off 停止。",
-            )
-            return
         pending_address = self.store.get_chat_setting(
             chat_id,
             f"pending_alias:{chat_id}",
@@ -3837,10 +3849,20 @@ class TelegramBot:
             )
         self.client.send_message(chat_id, "\n".join(lines))
 
-    # ---------- auto hunt ----------
+    # ---------- auto hunt processes ----------
 
-    def _auto_config(self, chat_id):
-        raw_coins = self.store.get_chat_setting(chat_id, "autohunt_coins", None)
+    @staticmethod
+    def _auto_key(name, field):
+        return f"autohunt_proc:{name}:{field}"
+
+    def _autohunt_names(self, chat_id):
+        return self.store.get_autohunt_names(chat_id)
+
+    def _auto_config(self, chat_id, name):
+        if not name:
+            return None
+        key = self._auto_key
+        raw_coins = self.store.get_chat_setting(chat_id, key(name, "coins"), None)
         coins = None
         if raw_coins:
             try:
@@ -3850,20 +3872,21 @@ class TelegramBot:
             except (TypeError, ValueError):
                 pass
         try:
-            limit = max(1, int(float(str(self.store.get_chat_setting(chat_id, "autohunt_limit", "20")))))
+            limit = max(1, int(float(str(self.store.get_chat_setting(chat_id, key(name, "limit"), "20")))))
         except (TypeError, ValueError):
             limit = 20
         try:
-            interval_h = max(1.0, float(str(self.store.get_chat_setting(chat_id, "autohunt_interval_h", "6"))))
+            interval_h = max(1.0, float(str(self.store.get_chat_setting(chat_id, key(name, "interval_h"), "6"))))
         except (TypeError, ValueError):
             interval_h = 6.0
         try:
-            last_run = int(float(str(self.store.get_chat_setting(chat_id, "autohunt_last_run", "0"))))
+            last_run = int(float(str(self.store.get_chat_setting(chat_id, key(name, "last_run"), "0"))))
         except (TypeError, ValueError):
             last_run = 0
-        enabled = str(self.store.get_chat_setting(chat_id, "autohunt_enabled", None)) == "1"
+        enabled = str(self.store.get_chat_setting(chat_id, key(name, "enabled"), None)) == "1"
         configured = raw_coins is not None
         return {
+            "name": name,
             "configured": configured,
             "coins": coins,
             "limit": limit,
@@ -3873,10 +3896,15 @@ class TelegramBot:
         }
 
     def _finish_autohunt_coins(self, chat_id, coins):
+        name = str(self.store.get_chat_setting(chat_id, "pending_autohunt_name", "") or "")
         now_ms = int(time.time() * 1000)
+        if not name:
+            self.client.send_message(chat_id, "设置进程名失效了，请重新 /autohunt new 名称。")
+            return
+        key = self._auto_key
         self.store.set_chat_setting(
             chat_id,
-            "autohunt_coins",
+            key(name, "coins"),
             json.dumps(sorted(set(str(c).upper() for c in coins)), ensure_ascii=False),
             now_ms,
         )
@@ -3886,56 +3914,92 @@ class TelegramBot:
         scope = "、".join(sorted(set(str(c).upper() for c in coins))) if coins else "全部标的（综合）"
         self.client.send_message(
             chat_id,
-            f"自动猎手已选择：{scope}\n"
+            f"进程 {name} 已选择：{scope}\n"
             "请回复两个数字：每轮自动收集多少个 间隔多少小时。例如：20 6",
         )
 
     def _cmd_autohunt(self, chat_id, args):
-        cmd = args.strip().lower()
-        if cmd in {"off", "stop"}:
-            self.store.set_chat_setting(chat_id, "autohunt_enabled", None, int(time.time() * 1000))
-            self.client.send_message(chat_id, "已停止自动猎手（已收集账户保留，可用 /autohunt on 恢复）。")
-            return
-        if cmd in {"list", "status"}:
-            cfg = self._auto_config(chat_id)
-            accounts = self.store.get_auto_accounts(chat_id)
-            scope = "、".join(cfg["coins"]) if cfg["coins"] else "综合（全部）"
-            if not cfg["configured"]:
-                scope = "未设置"
-            lines = [
-                "自动猎手状态：",
-                f"标的：{scope}",
-                f"每轮收集：{cfg['limit']} 个 · 间隔：{cfg['interval_h']:g} 小时",
-                f"状态：{'运行中' if cfg['enabled'] else '已停止'}",
-                f"已自动收集账户：{len(accounts)} 个",
-                "可用命令：/autohunt on|off|now|list；重发 /autohunt 可重新选标的。",
-            ]
+        names = self._autohunt_names(chat_id)
+        parts = args.strip().split(maxsplit=1)
+        mode = parts[0].lower() if parts else ""
+        rest = parts[1].strip() if len(parts) > 1 else ""
+
+        if not mode or mode in {"list", "ls", "status"}:
+            if not names:
+                self.client.send_message(
+                    chat_id,
+                    "还没有自动猎手进程。\n"
+                    "用法：/autohunt new 名称\n"
+                    "例如：/autohunt new btc\n"
+                    "然后按提示选标的、回复“数量 间隔小时”。",
+                )
+                return
+            lines = ["自动猎手进程："]
+            for name in sorted(names):
+                cfg = self._auto_config(chat_id, name)
+                if not cfg:
+                    continue
+                accounts = self.store.get_auto_accounts(chat_id, name)
+                scope = "、".join(cfg["coins"]) if cfg["coins"] else "综合"
+                status = "运行中" if cfg["enabled"] else "已停止"
+                lines.append(
+                    f"· {name}：{scope} | 每轮 {cfg['limit']} | 间隔 {cfg['interval_h']:g}h | {status} | 账户 {len(accounts)}"
+                )
+            lines.append("管理：/autohunt on|off|now|del 名称 | 新建：/autohunt new 名称")
             self.client.send_message(chat_id, "\n".join(lines))
             return
-        if cmd in {"now", "run"}:
-            cfg = self._auto_config(chat_id)
-            if not cfg["configured"]:
-                self.client.send_message(chat_id, "还没有设置标的，请先发送 /autohunt 选择。")
+
+        if mode in {"new", "add"}:
+            name = rest.split(maxsplit=1)[0].strip().lower() if rest else ""
+            if not name or not all(ch.isalnum() or ch in "_-" for ch in name) or len(name) > 24:
+                self.client.send_message(chat_id, "进程名请用字母/数字/下划线/短横线，最长 24 个字符，例如 btc_gold。")
                 return
-            self._start_auto_scan(chat_id, manual=True)
-            return
-        if cmd:
+            now_ms = int(time.time() * 1000)
+            self.store.set_chat_setting(chat_id, "pending_autohunt_name", name, now_ms)
+            self.store.set_chat_setting(chat_id, "pending_autohunt_setup", "1", now_ms)
+            self.store.set_chat_setting(chat_id, "hunt_sel", None, now_ms)
+            tip = "（该名称已存在，重新设置会覆盖之前的标的）\n" if name in names else ""
             self.client.send_message(
                 chat_id,
-                "用法：\n"
-                "/autohunt - 重新设置标的\n"
-                "/autohunt on / off - 启动 / 停止\n"
-                "/autohunt now - 立即跑一轮\n"
-                "/autohunt list - 查看状态",
+                f"创建进程 {name}，选择要追踪的标的（可多选）；选「综合」则按全部交易计算：\n{tip}",
+                reply_markup=hunt_category_keyboard(self._hunt_swing_enabled(chat_id)),
             )
             return
-        now_ms = int(time.time() * 1000)
-        self.store.set_chat_setting(chat_id, "pending_autohunt_setup", "1", now_ms)
-        self.store.set_chat_setting(chat_id, "hunt_sel", None, now_ms)
+
+        if mode in {"on", "off", "now", "del", "run"}:
+            name = rest.split()[0].lower() if rest else ""
+            if name not in names:
+                self.client.send_message(chat_id, f"找不到进程 {name}，先 /autohunt list 查看。")
+                return
+            now_ms = int(time.time() * 1000)
+            key = self._auto_key
+            if mode == "on":
+                self.store.set_chat_setting(chat_id, key(name, "enabled"), "1", now_ms)
+                self.store.set_chat_setting(chat_id, key(name, "last_run"), "0", now_ms)
+                self.client.send_message(chat_id, f"进程 {name} 已开启，到点会自动扫描。")
+            elif mode == "off":
+                self.store.set_chat_setting(chat_id, key(name, "enabled"), None, now_ms)
+                self.client.send_message(chat_id, f"进程 {name} 已停止（已收集账户保留）。")
+            elif mode in {"now", "run"}:
+                cfg = self._auto_config(chat_id, name)
+                if not cfg or not cfg["configured"]:
+                    self.client.send_message(chat_id, f"进程 {name} 还没选标的，先 /autohunt new {name} 重设。")
+                    return
+                self._start_auto_scan(chat_id, name, manual=True)
+            elif mode == "del":
+                self.store.remove_auto_accounts(chat_id, name)
+                for field in ("coins", "limit", "interval_h", "enabled", "last_run"):
+                    self.store.set_chat_setting(chat_id, key(name, field), None, now_ms)
+                self.client.send_message(chat_id, f"进程 {name} 已删除。")
+            return
+
         self.client.send_message(
             chat_id,
-            "设置自动猎手：选择要追踪的标的（可多选）；选「综合」则按全部交易计算：",
-            reply_markup=hunt_category_keyboard(self._hunt_swing_enabled(chat_id)),
+            "用法：\n"
+            "/autohunt new 名称 - 新建一个自动猎手进程\n"
+            "/autohunt list - 查看所有进程\n"
+            "/autohunt on|off|now|del 名称 - 启动/停止/立即跑/删除\n"
+            "查看挂单区：/zones 进程名 [标的]",
         )
 
     def _auto_hunt_loop(self):
@@ -3948,9 +4012,9 @@ class TelegramBot:
                 print(f"[autohunt] loop error: {exc}")
 
     def _run_due_auto_hunts(self):
-        for chat_id in self.store.chat_ids_with_setting("autohunt_enabled"):
-            cfg = self._auto_config(chat_id)
-            if not cfg["enabled"]:
+        for chat_id, name in self.store.enabled_autohunt_processes():
+            cfg = self._auto_config(chat_id, name)
+            if not cfg or not cfg["enabled"]:
                 continue
             now_ms = int(time.time() * 1000)
             interval_ms = max(1.0, cfg["interval_h"]) * 3600000
@@ -3958,45 +4022,51 @@ class TelegramBot:
                 continue
             if not self._auto_run_lock.acquire(blocking=False):
                 continue
-            def run_locked(cid=chat_id):
+
+            def run_locked(cid=chat_id, proc=name):
                 try:
-                    self._run_auto_scan(cid)
+                    self._run_auto_scan(cid, proc)
                 except Exception as exc:
-                    print(f"[autohunt] scan failed {cid}: {exc}")
+                    print(f"[autohunt] scan failed {cid}/{proc}: {exc}")
                 finally:
                     self.store.set_chat_setting(
                         cid,
-                        "autohunt_last_run",
+                        self._auto_key(proc, "last_run"),
                         str(int(time.time() * 1000)),
                         int(time.time() * 1000),
                     )
                     self._auto_run_lock.release()
+
             threading.Thread(target=run_locked, daemon=True).start()
 
-    def _start_auto_scan(self, chat_id, manual=False):
+    def _start_auto_scan(self, chat_id, name, manual=False):
         if not self._auto_run_lock.acquire(blocking=False):
             if manual:
                 self.client.send_message(chat_id, "已经有一轮自动猎手在跑，稍后再试。")
             return
         if manual:
-            self.client.send_message(chat_id, "🔄 自动猎手开始扫描，完成后会通知你。")
-        def run_locked(cid=chat_id):
+            self.client.send_message(chat_id, f"🔄 进程 {name} 开始扫描，完成后会通知你。")
+
+        def run_locked(cid=chat_id, proc=name):
             try:
-                self._run_auto_scan(cid)
+                self._run_auto_scan(cid, proc)
             except Exception as exc:
-                print(f"[autohunt] scan failed {cid}: {exc}")
+                print(f"[autohunt] scan failed {cid}/{proc}: {exc}")
             finally:
                 self.store.set_chat_setting(
                     cid,
-                    "autohunt_last_run",
+                    self._auto_key(proc, "last_run"),
                     str(int(time.time() * 1000)),
                     int(time.time() * 1000),
                 )
                 self._auto_run_lock.release()
+
         threading.Thread(target=run_locked, daemon=True).start()
 
-    def _run_auto_scan(self, chat_id):
-        cfg = self._auto_config(chat_id)
+    def _run_auto_scan(self, chat_id, name):
+        cfg = self._auto_config(chat_id, name)
+        if not cfg or not cfg["configured"]:
+            return
         results = scan(
             self.config,
             self.monitor.api,
@@ -4005,43 +4075,62 @@ class TelegramBot:
         )
         now_ms = int(time.time() * 1000)
         for item in results:
-            self.store.upsert_auto_account(chat_id, item, ts=now_ms)
-        total = len(self.store.get_auto_accounts(chat_id))
+            self.store.upsert_auto_account(chat_id, name, item, ts=now_ms)
+        total = len(self.store.get_auto_accounts(chat_id, name))
         scope = "、".join(cfg["coins"]) if cfg["coins"] else "综合"
         self.client.send_message(
             chat_id,
-            f"自动猎手本轮完成：新收录 {len(results)} 个账户（{scope}），"
-            f"当前自动列表共 {total} 个。\n用 /zones 查看它们的挂单密集区。",
+            f"进程 {name} 本轮完成：新收录 {len(results)} 个账户（{scope}），"
+            f"该进程自动列表共 {total} 个。\n用 /zones {name} 查看挂单密集区。",
         )
 
     # ---------- auto account order zones ----------
 
     def _cmd_zones(self, chat_id, args):
-        accounts = self.store.get_auto_accounts(chat_id)
-        if not accounts:
-            self.client.send_message(chat_id, "自动列表还是空的，先 /autohunt 设置并等一两轮收集。")
+        names = self._autohunt_names(chat_id)
+        if not names:
+            self.client.send_message(chat_id, "还没有自动猎手进程，先 /autohunt new 名称。")
             return
-        cfg = self._auto_config(chat_id)
-        tokens = args.strip().replace(",", " ").split()
+        parts = args.strip().split()
+        proc = None
+        symbols_text = []
+        if parts and parts[0].lower() in {n.lower() for n in names}:
+            proc = next(n for n in names if n.lower() == parts[0].lower())
+            symbols_text = parts[1:]
+        elif len(names) == 1:
+            proc = names[0]
+            symbols_text = parts
+        else:
+            self.client.send_message(
+                chat_id,
+                "你有多个自动猎手进程，请指定：/zones 进程名 [标的]，例如 /zones btc BTC GOLD。\n"
+                "进程：" + "、".join(sorted(names)),
+            )
+            return
+        cfg = self._auto_config(chat_id, proc)
         symbols = []
-        for token in tokens:
+        for token in symbols_text:
             token = str(token).upper()
             if ":" in token:
                 token = token.rsplit(":", 1)[-1]
             if token not in symbols:
                 symbols.append(token)
         if not symbols:
-            symbols = list(cfg["coins"] or [])
+            symbols = list((cfg or {}).get("coins") or [])
         if not symbols:
             self.client.send_message(
                 chat_id,
-                "自动猎手设的是综合，/zones 需要指定标的，例如：/zones BTC GOLD",
+                f"进程 {proc} 设的是综合，/zones {proc} 需要带标的，例如 /zones {proc} BTC GOLD。",
             )
+            return
+        accounts = self.store.get_auto_accounts(chat_id, proc)
+        if not accounts:
+            self.client.send_message(chat_id, f"进程 {proc} 的自动列表还是空的，先等它跑一轮。")
             return
         placeholder_id = self._send_loading(chat_id, "🔍 正在拉取自动账户挂单并聚合…")
         def work():
             try:
-                text = self._build_auto_zones_report(chat_id, symbols, accounts)
+                text = self._build_auto_zones_report(chat_id, proc, symbols, accounts)
             except Exception as exc:
                 print(f"[zones] report failed: {exc}")
                 text = f"挂单区统计失败: {exc}"
@@ -4054,7 +4143,7 @@ class TelegramBot:
                 self.client.send_message(chat_id, text, parse_mode="HTML")
         threading.Thread(target=work, daemon=True).start()
 
-    def _build_auto_zones_report(self, chat_id, symbols, accounts):
+    def _build_auto_zones_report(self, chat_id, proc, symbols, accounts):
         selected = set(symbols)
         api = self.monitor.api
         dex_map = _build_coin_dex_map(api)
@@ -4095,7 +4184,7 @@ class TelegramBot:
                     flat.append(item)
         if not flat:
             scope = "、".join(sorted(selected))
-            return f"这些自动账户目前在 {scope} 上没有普通挂单。"
+            return f"进程 {proc}：这些自动账户目前在 {scope} 上没有普通挂单。"
         merge = self.config.order_merge
         clusters = cluster_open_orders(
             flat,
@@ -4119,7 +4208,6 @@ class TelegramBot:
                     "coin": str(cluster[0].get("coin") or ""),
                     "min_px": stats["min_px"],
                     "max_px": stats["max_px"],
-                    "avg_px": stats["avg_px"],
                     "orders": len(cluster),
                     "accounts": len(accounts_in),
                     "value": total_value,
@@ -4129,7 +4217,7 @@ class TelegramBot:
         rows = rows[:12]
         account_count = len({str(a.get("address", "")) for a in accounts[:40]})
         lines = [
-            "<b>自动猎手 · 挂单密集区</b>",
+            f"<b>自动猎手 {proc} · 挂单密集区</b>",
             f"统计账户：{account_count} 个 · 标的：{'、'.join(sorted(selected))}",
             "<table bordered compact>",
             "<tr><td>方向</td><td>币种</td><td>价格区间</td><td>单数/账户</td><td>名义金额</td></tr>",

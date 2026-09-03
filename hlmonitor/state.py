@@ -85,6 +85,15 @@ CREATE TABLE IF NOT EXISTS auto_accounts (
     scanned_at    INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (chat_id, address)
 );
+CREATE TABLE IF NOT EXISTS auto_process_accounts (
+    chat_id       TEXT NOT NULL,
+    proc          TEXT NOT NULL,
+    address       TEXT NOT NULL,
+    alias         TEXT NOT NULL DEFAULT '',
+    account_value REAL NOT NULL DEFAULT 0,
+    scanned_at    INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (chat_id, proc, address)
+);
 CREATE INDEX IF NOT EXISTS idx_events_ts ON events(ts);
 CREATE INDEX IF NOT EXISTS idx_snapshots_addr_ts ON snapshots(address, ts);
 """
@@ -278,14 +287,15 @@ class EventStore:
             weighted_win_rate, profit_factor, score, sample_size, scanned_at in rows
         ]
 
-    def upsert_auto_account(self, chat_id, account, ts=None):
+    def upsert_auto_account(self, chat_id, proc, account, ts=None):
         with self._lock:
             self.conn.execute(
-                "INSERT OR REPLACE INTO auto_accounts("
-                " chat_id, address, alias, account_value, scanned_at)"
-                " VALUES (?,?,?,?,?)",
+                "INSERT OR REPLACE INTO auto_process_accounts("
+                " chat_id, proc, address, alias, account_value, scanned_at)"
+                " VALUES (?,?,?,?,?,?)",
                 (
                     str(chat_id),
+                    str(proc or "default"),
                     str(account.get("address", "")).lower(),
                     str(account.get("alias") or ""),
                     _as_float(account.get("account_value"), 0.0),
@@ -294,13 +304,14 @@ class EventStore:
             )
             self.conn.commit()
 
-    def get_auto_accounts(self, chat_id):
+    def get_auto_accounts(self, chat_id, proc):
         with self._lock:
             rows = self.conn.execute(
                 "SELECT address, alias, account_value, scanned_at"
-                " FROM auto_accounts WHERE chat_id = ?"
+                " FROM auto_process_accounts"
+                " WHERE chat_id = ? AND proc = ?"
                 " ORDER BY scanned_at DESC, account_value DESC",
-                (str(chat_id),),
+                (str(chat_id), str(proc or "default")),
             ).fetchall()
         return [
             {
@@ -312,12 +323,42 @@ class EventStore:
             for address, alias, account_value, scanned_at in rows
         ]
 
-    def remove_auto_accounts(self, chat_id):
+    def remove_auto_accounts(self, chat_id, proc):
         with self._lock:
             self.conn.execute(
-                "DELETE FROM auto_accounts WHERE chat_id = ?", (str(chat_id),)
+                "DELETE FROM auto_process_accounts WHERE chat_id = ? AND proc = ?",
+                (str(chat_id), str(proc or "default")),
             )
             self.conn.commit()
+
+    def get_autohunt_names(self, chat_id):
+        with self._lock:
+            rows = self.conn.execute(
+                "SELECT key FROM chat_settings"
+                " WHERE chat_id = ? AND key LIKE 'autohunt_proc:%:coins'",
+                (str(chat_id),),
+            ).fetchall()
+        names = []
+        prefix = "autohunt_proc:"
+        for (key,) in rows:
+            name = key[len(prefix):-len(":coins")]
+            if name and name not in names:
+                names.append(name)
+        return names
+
+    def enabled_autohunt_processes(self):
+        with self._lock:
+            rows = self.conn.execute(
+                "SELECT chat_id, key FROM chat_settings"
+                " WHERE key LIKE 'autohunt_proc:%:enabled' AND value = '1'",
+            ).fetchall()
+        out = []
+        prefix = "autohunt_proc:"
+        for chat_id, key in rows:
+            name = key[len(prefix):-len(":enabled")]
+            if name:
+                out.append((str(chat_id), name))
+        return out
 
     def chat_ids_with_setting(self, key, value="1"):
         with self._lock:
@@ -466,18 +507,33 @@ class EventStore:
                 "SELECT value FROM chat_settings WHERE chat_id = ? AND key = ?",
                 (str(chat_id), key),
             ).fetchone()
-        return row[0] if row else default
+        if row is None:
+            return default
+        if row[0] == "None":
+            self.conn.execute(
+                "DELETE FROM chat_settings WHERE chat_id = ? AND key = ?",
+                (str(chat_id), key),
+            )
+            self.conn.commit()
+            return default
+        return row[0]
 
     def set_chat_setting(self, chat_id, key, value, ts=None):
         with self._lock:
-            self.conn.execute(
-                "INSERT INTO chat_settings(chat_id, key, value, updated_ms)"
-                " VALUES (?,?,?,?)"
-                " ON CONFLICT(chat_id, key) DO UPDATE SET"
-                " value = excluded.value,"
-                " updated_ms = excluded.updated_ms",
-                (str(chat_id), key, str(value), int(ts or 0)),
-            )
+            if value is None:
+                self.conn.execute(
+                    "DELETE FROM chat_settings WHERE chat_id = ? AND key = ?",
+                    (str(chat_id), key),
+                )
+            else:
+                self.conn.execute(
+                    "INSERT INTO chat_settings(chat_id, key, value, updated_ms)"
+                    " VALUES (?,?,?,?)"
+                    " ON CONFLICT(chat_id, key) DO UPDATE SET"
+                    " value = excluded.value,"
+                    " updated_ms = excluded.updated_ms",
+                    (str(chat_id), key, str(value), int(ts or 0)),
+                )
             self.conn.commit()
 
     def close(self):
