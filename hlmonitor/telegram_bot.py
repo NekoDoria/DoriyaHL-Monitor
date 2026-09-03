@@ -42,7 +42,7 @@ HELP_TEXT = """Hyperliquid 地址监控 Bot
 /tpsl [0x地址] - 查看当前挂着的止盈止损单
 /orders [0x地址] - 查看普通挂单：先选账户，再选标的，价格相近的会合并成密集区间
 /recent [条数] - 查看最近事件
-/hunt [数量] - 扫描 Hyperliquid 大户：按体量粗筛、精算胜率并收集
+/hunt [数量] - 先选择要统计的标的（或综合），再输入数量扫描大户
 /huntlist - 查看已收集的大户账户（可一键加入监控）
 /coins - 选择要接收交易通知的币种
 /mute - 暂停当前聊天的告警
@@ -173,6 +173,34 @@ MAIN_COINS = [
 
 PRECIOUS_METAL_COINS = ["PAXG", "XAUT", "XAU", "XAG"]
 
+STOCK_COINS = [
+    "AAPL", "TSLA", "NVDA", "META", "AMZN", "MSFT", "GOOGL", "GOOG", "NFLX",
+    "AMD", "INTC", "COIN", "MSTR", "SPY", "QQQ", "PLTR", "AVGO", "ORCL",
+    "CRM", "UBER", "SHOP", "PYPL", "ABNB", "TSM", "BABA", "DIS", "NKE",
+    "JPM", "V", "MA", "XOM", "WMT", "PG", "KO", "PEP", "MCD", "HD",
+    "CSCO", "QCOM", "TXN", "IBM", "ADBE", "SNOW", "CRWD", "PANW", "BAC",
+    "COST", "LLY", "ASML", "ARM",
+]
+
+HUNT_METAL_SYMBOLS = {
+    "GOLD", "SILVER", "PLATINUM", "PALLADIUM",
+    "XAU", "XAG", "PAXG", "XAUT",
+}
+
+HUNT_STOCK_SYMBOLS = set(STOCK_COINS) | {
+    "SNDK", "CRCL", "SKHX", "RIVN", "CRWV", "GME", "HIMS", "DKNG",
+    "LITE", "MRVL", "RKLB", "BIRD", "ZM", "EBAY", "NOW", "NBIS",
+    "WDC", "NOK", "STRC", "AMAT", "IBIDEN", "GEV", "IREN", "NET",
+    "RDDT", "AAOI", "MRNA", "SHEIN", "KIOXIA", "SOFTBANK", "HYUNDAI", "SMSN",
+    "BX", "DELL", "UNITREE", "CXMT", "YMTC", "SKHY", "GIGADEV", "SHAZ",
+    "LYTE", "RTX", "XIAOMI", "TENCENT", "KWEB", "CAMBRICON", "NAVER", "SMCI",
+    "MELI", "SOFI", "TTWO", "COHR", "GLW", "CRDO", "LRCX", "STX",
+    "VST", "TER", "CIEN", "IONQ", "GPRO", "IGV", "GLDMINE", "SMH",
+    "SOXL", "MAGS", "XBI", "XLE", "URNM", "KORU", "KSTR", "EWY",
+    "EWJ", "EWZ", "EWT", "SPACEX", "OPENAI", "ANTHROPIC", "OAI", "ANTH",
+    "BB", "INNOLIGHT",
+}
+
 
 def coin_category_keyboard():
     return {
@@ -185,6 +213,10 @@ def coin_category_keyboard():
                 {
                     "text": "贵金属",
                     "callback_data": "c:cat:metal",
+                },
+                {
+                    "text": "美股",
+                    "callback_data": "c:cat:stocks",
                 },
             ],
             [
@@ -256,6 +288,72 @@ def coin_list_keyboard(coins, selected, page=0, category="main"):
     return {"inline_keyboard": rows}
 
 
+def hunt_category_keyboard():
+    return {
+        "inline_keyboard": [
+            [
+                {"text": "主流币种", "callback_data": "hq:cat:main"},
+                {"text": "贵金属", "callback_data": "hq:cat:metal"},
+                {"text": "美股", "callback_data": "hq:cat:stocks"},
+            ],
+            [
+                {"text": "其他币种", "callback_data": "hq:cat:other"},
+                {"text": "综合（全部）", "callback_data": "hq:all"},
+            ],
+        ]
+    }
+
+
+def hunt_coins_keyboard(category, coins, selected, page=0):
+    total_pages = max(1, (len(coins) + COIN_PAGE_SIZE - 1) // COIN_PAGE_SIZE)
+    page = max(0, min(page, total_pages - 1))
+    start = page * COIN_PAGE_SIZE
+    page_coins = coins[start : start + COIN_PAGE_SIZE]
+
+    rows = []
+    for index in range(0, len(page_coins), COIN_COLS):
+        row = []
+        for coin in page_coins[index : index + COIN_COLS]:
+            row.append(
+                {
+                    "text": f"✅ {coin}" if coin in selected else coin,
+                    "callback_data": f"hq:{category}:t:{page}:{coin}",
+                }
+            )
+        rows.append(row)
+
+    nav = []
+    if page > 0:
+        nav.append(
+            {
+                "text": "◀️ 上一页",
+                "callback_data": f"hq:{category}:n:{page - 1}",
+            }
+        )
+    if page < total_pages - 1:
+        nav.append(
+            {
+                "text": "下一页 ▶️",
+                "callback_data": f"hq:{category}:n:{page + 1}",
+            }
+        )
+    if nav:
+        rows.append(nav)
+    rows.append(
+        [
+            {"text": "全选", "callback_data": f"hq:{category}:a"},
+            {"text": "清空", "callback_data": f"hq:{category}:c"},
+        ]
+    )
+    rows.append(
+        [
+            {"text": "返回分类", "callback_data": "hq:back"},
+            {"text": "✅ 完成，输入数量", "callback_data": f"hq:done:{category}"},
+        ]
+    )
+    return {"inline_keyboard": rows}
+
+
 def _as_float(value, default=0.0):
     try:
         return float(value)
@@ -275,9 +373,9 @@ FILL_WINDOWS = (
 FILL_WINDOW_LABELS = {minutes: label for minutes, label in FILL_WINDOWS}
 
 FILL_STATS_VIEWS = (
+    ("interval", "区间"),
     ("summary", "汇总"),
     ("timeline", "流水"),
-    ("interval", "区间"),
 )
 FILL_STATS_VIEW_LABELS = {key: label for key, label in FILL_STATS_VIEWS}
 
@@ -287,7 +385,7 @@ def fill_stats_keyboard(
     window_min=5,
     subscriptions=None,
     selected_address=None,
-    view="summary",
+    view="interval",
     page=0,
     page_count=1,
 ):
@@ -416,6 +514,12 @@ def format_fill_stats_html(address, fills, window_min=5, now=None, page=0, page_
     total_notional = sum(item["notional"] for _, item in ordered)
     lines.append(f"总成交额: {html.escape(fmt_usd_cn(total_notional))}")
 
+    def pair_text(value, size):
+        if value > 1e-9:
+            return f"{fmt_usd_cn(value)} / {fmt_szi(size)}"
+        return "-"
+
+    chunks = []
     for coin, stat in page_coins:
         net = stat["buy_notional"] - stat["sell_notional"]
         if net > 1e-9:
@@ -424,28 +528,28 @@ def format_fill_stats_html(address, fills, window_min=5, now=None, page=0, page_
             direction = "净空"
         else:
             direction = "均衡"
-        body_lines = []
-        for label, count, buy_notional, buy_size, sell_notional, sell_size in (
-            ("开仓", stat["open_count"], stat["open_buy_notional"], stat["open_buy_size"], stat["open_sell_notional"], stat["open_sell_size"]),
-            ("平仓", stat["close_count"], stat["close_buy_notional"], stat["close_buy_size"], stat["close_sell_notional"], stat["close_sell_size"]),
-        ):
-            if count <= 0:
-                continue
-            body_lines.append(f"{label} | {count}笔")
-            if buy_notional > 1e-9:
-                body_lines.append(f"买入 {fmt_usd_cn(buy_notional)} / {fmt_szi(buy_size)}")
-            if sell_notional > 1e-9:
-                body_lines.append(f"卖出 {fmt_usd_cn(sell_notional)} / {fmt_szi(sell_size)}")
-        body_lines.append(
-            f"成交额: {fmt_usd_cn(stat['notional'])} · 最近: {fmt_time_min(stat['last_time'])}"
+        open_buy = pair_text(stat["open_buy_notional"], stat["open_buy_size"])
+        open_sell = pair_text(stat["open_sell_notional"], stat["open_sell_size"])
+        close_buy = pair_text(stat["close_buy_notional"], stat["close_buy_size"])
+        close_sell = pair_text(stat["close_sell_notional"], stat["close_sell_size"])
+        rows = (
+            f"<tr><td>开仓</td><td>{stat['open_count']} 笔</td>"
+            f"<td>平仓</td><td>{stat['close_count']} 笔</td></tr>"
+            f"<tr><td>买入</td><td>{html.escape(open_buy)}</td>"
+            f"<td>买入</td><td>{html.escape(close_buy)}</td></tr>"
+            f"<tr><td>卖出</td><td>{html.escape(open_sell)}</td>"
+            f"<td>卖出</td><td>{html.escape(close_sell)}</td></tr>"
+            f"<tr><td>成交额</td><td>{html.escape(fmt_usd_cn(stat['notional']))}</td>"
+            f"<td>最近</td><td>{html.escape(fmt_time_min(stat['last_time']))}</td></tr>"
         )
-        body = "\n".join(html.escape(line) for line in body_lines)
-        lines.append("")
-        lines.append(
-            f"<b>{html.escape(coin)} · {direction}</b>\n"
-            f"<blockquote expandable>{body}</blockquote>"
+        chunks.append(
+            f"<b>{html.escape(coin)} · {direction}</b>"
+            f"<table bordered compact>{rows}</table>"
         )
-    return "\n".join(lines), total_pages
+    head_text = "\n".join(lines)
+    if not chunks:
+        return head_text, total_pages
+    return head_text + "\n\n" + "".join(chunks), total_pages
 
 
 def format_fill_timeline_html(address, fills, window_min=5, now=None, page=0, page_size=20):
@@ -1221,11 +1325,11 @@ class TelegramRouter:
             self.store.get_chat_setting(
                 chat_id,
                 f"fill_stats_view:{address}",
-                "summary",
+                "interval",
             )
         )
         if view not in FILL_STATS_VIEW_LABELS:
-            view = "summary"
+            view = "interval"
 
         try:
             page = int(
@@ -1365,6 +1469,8 @@ class TelegramBot:
         self._update_offset = None
         self._universe_cache = None
         self._universe_cache_at = 0
+        self._hunt_universe_cache = None
+        self._hunt_universe_cache_at = 0
 
     def start(self):
         self.client.delete_webhook()
@@ -1460,6 +1566,44 @@ class TelegramBot:
             return
 
         text = (message.get("text") or "").strip()
+        pending_limit = self.store.get_chat_setting(
+            chat_id,
+            "pending_hunt_limit",
+            None,
+        )
+        if pending_limit:
+            first_word = (
+                text.split(maxsplit=1)[0].split("@", 1)[0].lower()
+                if text
+                else ""
+            )
+            if first_word == "/skip":
+                self._clear_hunt_pending(chat_id)
+                self.client.send_message(chat_id, "已取消 hunt。")
+                return
+            if text.startswith("/"):
+                self._clear_hunt_pending(chat_id)
+            else:
+                try:
+                    limit = int(text.strip())
+                except (TypeError, ValueError):
+                    self.client.send_message(
+                        chat_id,
+                        "请输入数字（例如 10；0 = 默认数量），或回复 /skip 取消。",
+                    )
+                    return
+                if limit < 0:
+                    limit = 0
+                if limit > 50:
+                    limit = 50
+                self.store.set_chat_setting(
+                    chat_id,
+                    "pending_hunt_limit",
+                    None,
+                    int(time.time() * 1000),
+                )
+                self._run_hunt(chat_id, limit, self._load_hunt_filter(chat_id))
+                return
         pending_address = self.store.get_chat_setting(
             chat_id,
             f"pending_alias:{chat_id}",
@@ -1495,6 +1639,15 @@ class TelegramBot:
             return
         if self.allowed_chat_ids and chat_id not in self.allowed_chat_ids:
             self.client.answer_callback_query(callback_id, "没有权限。")
+            return
+
+        if data.startswith("hq:"):
+            self._handle_hunt_pick_callback(
+                callback_id,
+                chat_id,
+                message_id,
+                data,
+            )
             return
 
         if data.startswith("hp:"):
@@ -1711,11 +1864,11 @@ class TelegramBot:
             self.store.get_chat_setting(
                 chat_id,
                 f"fill_stats_view:{address}",
-                "summary",
+                "interval",
             )
         )
         if view not in FILL_STATS_VIEW_LABELS:
-            view = "summary"
+            view = "interval"
         self.store.set_chat_setting(
             chat_id,
             f"fill_stats_page:{address}:{view}",
@@ -1839,11 +1992,11 @@ class TelegramBot:
             self.store.get_chat_setting(
                 chat_id,
                 f"fill_stats_view:{address}",
-                "summary",
+                "interval",
             )
         )
         if view not in FILL_STATS_VIEW_LABELS:
-            view = "summary"
+            view = "interval"
         self.store.set_chat_setting(
             chat_id,
             f"fill_stats_page:{address}:{view}",
@@ -2038,7 +2191,7 @@ class TelegramBot:
                 self.client.answer_callback_query(callback_id)
                 return
 
-        if category not in {"main", "metal", "other"}:
+        if category not in {"main", "metal", "stocks", "other"}:
             self.client.answer_callback_query(callback_id)
             return
 
@@ -2342,13 +2495,98 @@ class TelegramBot:
             self.client.send_message(chat_id, report, parse_mode="HTML")
 
     def _cmd_hunt(self, chat_id, args):
-        placeholder_id = self._send_loading(chat_id, "⏳ 正在扫描 Hyperliquid 大户…")
+        if args.strip():
+            try:
+                limit = int(args.strip())
+                if limit < 0:
+                    limit = 0
+            except ValueError:
+                self.client.send_message(
+                    chat_id,
+                    "数量格式不对，例如 /hunt 10；不带参数可先选标的。",
+                )
+                return
+            self._run_hunt(chat_id, limit, self._load_hunt_filter(chat_id))
+            return
+        self._clear_hunt_pending(chat_id)
+        self.client.send_message(
+            chat_id,
+            "选择要统计胜率的标的（可多选）；选「综合」则按全部交易计算：",
+            reply_markup=hunt_category_keyboard(),
+        )
+
+    def _load_hunt_filter(self, chat_id):
+        raw = self.store.get_chat_setting(chat_id, "hunt_coins", None)
+        if raw is None:
+            return None
         try:
-            limit = int(args.strip())
-            if limit <= 0:
-                limit = 0
+            coins = json.loads(raw)
         except (TypeError, ValueError):
-            limit = 0
+            return None
+        if not isinstance(coins, list) or not coins:
+            return None
+        return [str(c).upper() for c in coins]
+
+    def _get_hunt_selected(self, chat_id, coins):
+        raw = self.store.get_chat_setting(chat_id, "hunt_sel", None)
+        if raw is None:
+            return set()
+        try:
+            selected = set(json.loads(raw))
+        except (TypeError, ValueError):
+            return set()
+        return {coin for coin in selected if coin in coins}
+
+    def _set_hunt_selected(self, chat_id, selected):
+        self.store.set_chat_setting(
+            chat_id,
+            "hunt_sel",
+            json.dumps(sorted(selected), ensure_ascii=False),
+            int(time.time() * 1000),
+        )
+
+    def _clear_hunt_pending(self, chat_id):
+        now_ms = int(time.time() * 1000)
+        self.store.set_chat_setting(chat_id, "pending_hunt_limit", None, now_ms)
+        self.store.set_chat_setting(chat_id, "hunt_sel", None, now_ms)
+
+    def _hunt_category_coins(self, category, coins):
+        # Classify by the symbol after any dex prefix (xyz:GOLD -> GOLD),
+        # so HIP-3 builder markets work too.
+        if category == "main":
+            return [coin for coin in MAIN_COINS if coin in coins]
+        symbol = lambda coin: coin.rsplit(":", 1)[-1] if ":" in coin else coin
+        if category == "metal":
+            return [coin for coin in coins if symbol(coin) in HUNT_METAL_SYMBOLS]
+        if category == "stocks":
+            return [coin for coin in coins if symbol(coin) in HUNT_STOCK_SYMBOLS]
+        main_coins = set(MAIN_COINS) & set(coins)
+        return [
+            coin
+            for coin in coins
+            if coin not in main_coins
+            and symbol(coin) not in HUNT_METAL_SYMBOLS
+            and symbol(coin) not in HUNT_STOCK_SYMBOLS
+        ]
+
+    def _ask_hunt_limit(self, chat_id, coins):
+        now_ms = int(time.time() * 1000)
+        self.store.set_chat_setting(
+            chat_id,
+            "hunt_coins",
+            json.dumps([str(c).upper() for c in coins], ensure_ascii=False),
+            now_ms,
+        )
+        self.store.set_chat_setting(chat_id, "hunt_sel", None, now_ms)
+        self.store.set_chat_setting(chat_id, "pending_hunt_limit", "1", now_ms)
+        scope = "、".join(str(c) for c in coins) if coins else "全部标的（综合）"
+        self.client.send_message(
+            chat_id,
+            f"已选择：{scope}\n要 hunt 多少个账户？直接回复数字（例如 10；0 = 默认数量）。",
+        )
+
+    def _run_hunt(self, chat_id, limit, coins):
+        placeholder_id = self._send_loading(chat_id, "⏳ 正在扫描 Hyperliquid 大户…")
 
         def progress(done, total, address):
             if placeholder_id is not None and done % 3 == 0:
@@ -2374,7 +2612,12 @@ class TelegramBot:
 
         def work():
             try:
-                results = scan(self.config, self.monitor.api, progress=progress)
+                results = scan(
+                    self.config,
+                    self.monitor.api,
+                    progress=progress,
+                    coins=coins,
+                )
                 if limit > 0:
                     results = results[:limit]
                 for item in results:
@@ -2424,6 +2667,99 @@ class TelegramBot:
                     self.client.send_message(chat_id, error_text)
 
         threading.Thread(target=work, daemon=True).start()
+
+    def _handle_hunt_pick_callback(self, callback_id, chat_id, message_id, data):
+        try:
+            coins = self._get_hunt_coins()
+        except Exception as exc:
+            self.client.answer_callback_query(callback_id, f"获取标的失败: {exc}")
+            return
+        selected = self._get_hunt_selected(chat_id, coins)
+        parts = data.split(":")
+        if len(parts) < 2:
+            self.client.answer_callback_query(callback_id)
+            return
+        head = parts[1]
+        if head == "back":
+            self.client.edit_message_text(
+                chat_id,
+                message_id,
+                "选择要统计胜率的标的（可多选）；选「综合」则按全部交易计算：",
+                reply_markup=hunt_category_keyboard(),
+            )
+            self.client.answer_callback_query(callback_id)
+            return
+        if head == "all":
+            self._set_hunt_selected(chat_id, set())
+            self._ask_hunt_limit(chat_id, [])
+            self.client.answer_callback_query(callback_id, "已选综合（全部）")
+            return
+        if head == "done" and len(parts) >= 3:
+            self._ask_hunt_limit(chat_id, sorted(selected))
+            self.client.answer_callback_query(callback_id)
+            return
+        if head == "cat" and len(parts) >= 3:
+            category = parts[2]
+            page = 0
+        else:
+            category = head
+            action = parts[2] if len(parts) > 2 else ""
+            if action == "t" and len(parts) >= 5:
+                page = int(parts[3])
+                coin = ":".join(parts[4:])
+                if coin in selected:
+                    selected.discard(coin)
+                else:
+                    selected.add(coin)
+            elif action == "n" and len(parts) >= 4:
+                page = int(parts[3])
+            elif action == "a":
+                page = 0
+                selected.update(self._hunt_category_coins(category, coins))
+            elif action == "c":
+                page = 0
+                selected.difference_update(self._hunt_category_coins(category, coins))
+            else:
+                self.client.answer_callback_query(callback_id)
+                return
+
+        if category not in {"main", "metal", "stocks", "other"}:
+            self.client.answer_callback_query(callback_id)
+            return
+
+        self._set_hunt_selected(chat_id, selected)
+        category_coins = self._hunt_category_coins(category, coins)
+        if not category_coins:
+            text = f"{self._category_label(category)}：当前没有可用标的。"
+            keyboard = {
+                "inline_keyboard": [
+                    [{"text": "返回分类", "callback_data": "hq:back"}]
+                ]
+            }
+        else:
+            sel_in_cat = selected & set(category_coins)
+            text = (
+                f"选择 {self._category_label(category)}（已选 "
+                f"{len(sel_in_cat)}/{len(category_coins)}，可多选）"
+            )
+            keyboard = hunt_coins_keyboard(
+                category,
+                category_coins,
+                selected,
+                page,
+            )
+        try:
+            self.client.edit_message_text(
+                chat_id,
+                message_id,
+                text,
+                reply_markup=keyboard,
+            )
+        except Exception as exc:
+            print(f"[telegram] 更新 hunt 标的菜单失败: {exc}")
+            self.client.answer_callback_query(callback_id, "更新失败，请重试。")
+            return
+        self.client.answer_callback_query(callback_id)
 
     def _cmd_huntlist(self, chat_id):
         accounts = self.store.get_collected_accounts()
@@ -3133,6 +3469,32 @@ class TelegramBot:
         self._universe_cache_at = now
         return coins
 
+    def _get_hunt_coins(self):
+        """Native perps plus all HIP-3 builder perp coins (cached)."""
+        now = time.time()
+        if self._hunt_universe_cache and now - self._hunt_universe_cache_at < 6 * 3600:
+            return self._hunt_universe_cache
+        coins = set(self._get_coins())
+        try:
+            dexs = self.monitor.api.perp_dexs() or []
+            for item in dexs:
+                if not isinstance(item, dict):
+                    continue
+                dex = str(item.get("name") or "")
+                if not dex:
+                    continue
+                meta = self.monitor.api.meta_by_dex(dex) or {}
+                for uni in meta.get("universe") or []:
+                    name = str(uni.get("name") or "")
+                    if name:
+                        coins.add(name)
+        except Exception as exc:
+            print(f"[telegram] fetch HIP-3 coins failed, fallback to native: {exc}")
+        out = sorted(coins)
+        self._hunt_universe_cache = out
+        self._hunt_universe_cache_at = now
+        return out
+
     def _get_selected_coins(self, chat_id, coins):
         raw = self.store.get_chat_setting(chat_id, "notify_coins", None)
         if raw is None:
@@ -3162,7 +3524,13 @@ class TelegramBot:
             return [coin for coin in MAIN_COINS if coin in coins]
         if category == "metal":
             return [coin for coin in PRECIOUS_METAL_COINS if coin in coins]
-        known = set(MAIN_COINS) | set(PRECIOUS_METAL_COINS)
+        if category == "stocks":
+            return [coin for coin in STOCK_COINS if coin in coins]
+        known = (
+            set(MAIN_COINS)
+            | set(PRECIOUS_METAL_COINS)
+            | set(STOCK_COINS)
+        )
         return [coin for coin in coins if coin not in known]
 
     @staticmethod
@@ -3170,6 +3538,7 @@ class TelegramBot:
         return {
             "main": "主流币种",
             "metal": "贵金属",
+            "stocks": "美股",
             "other": "其他币种",
         }.get(category, "币种")
 

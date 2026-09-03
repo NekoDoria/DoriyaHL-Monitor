@@ -120,7 +120,7 @@ def _fill_win_stats(fills):
     }
 
 
-def scan(config, api, progress=None):
+def scan(config, api, progress=None, coins=None):
     """粗筛排行榜 -> 精算胜率 -> 过滤 -> 按综合评分排序，返回收集列表。"""
     hunter = config.hunter
     rows = fetch_leaderboard(config.network, config.proxy_url)
@@ -160,6 +160,13 @@ def scan(config, api, progress=None):
             fills = api.user_fills(cand["address"]) or []
         except Exception:
             fills = []
+        if coins:
+            coin_set = {str(c).upper() for c in coins}
+            fills = [
+                fill
+                for fill in fills
+                if str(fill.get("coin") or "").upper() in coin_set
+            ]
         stats = _fill_win_stats(fills)
         if stats["sample_size"] < 1:
             continue

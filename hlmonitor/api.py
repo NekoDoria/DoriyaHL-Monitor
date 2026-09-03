@@ -28,6 +28,17 @@ class HyperliquidAPI:
     def meta(self):
         return self._post({"type": "meta"})
 
+    def perp_dexs(self):
+        """List all builder-deployed perp dexes (HIP-3)."""
+        return self._post({"type": "perpDexs"})
+
+    def meta_by_dex(self, dex):
+        """Return the perp universe for a specific perp dex."""
+        payload = {"type": "meta"}
+        if dex:
+            payload["dex"] = dex
+        return self._post(payload)
+
     def all_mids(self):
         return self._post({"type": "allMids"})
 
