@@ -11,6 +11,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 from .alerts import build_notifier
 from .api import HyperliquidAPI
+from .assets import SpotPairNames, spot_coin_label
 from .brief import (
     build_open_orders_summaries,
     format_position_brief,
@@ -69,8 +70,7 @@ class AddressMonitor:
         self._started = False
         self._open_time_cache: dict[str, tuple[int, dict[str, int]]] = {}
         self._realized_pnl_cache: dict[str, tuple[float, float]] = {}
-        self._spot_meta_cache: dict[str, str] = {}
-        self._spot_meta_at = 0.0
+        self._spot_pair_names = SpotPairNames(self.api)
         self._vol_cache: dict[str, tuple[float, float | None]] = {}
 
     def start(self):
@@ -404,24 +404,11 @@ class AddressMonitor:
         ]
 
     def _spot_name_map(self):
-        """现货 token 编号 -> 币种名，带 5 分钟缓存。"""
-        now = time.time()
-        if self._spot_meta_cache and now - self._spot_meta_at < 300:
-            return self._spot_meta_cache
-        try:
-            data = self.api._post({"type": "spotMeta"})
-            names = {}
-            for token in data.get("tokens") or []:
-                index = token.get("index")
-                name = token.get("name")
-                if index is not None and name:
-                    names[str(index)] = str(name)
-            self._spot_meta_cache = names
-            self._spot_meta_at = now
-            return names
-        except Exception as exc:
-            print(f"[orders] 现货币种名拉取失败: {exc}")
-            return {}
+        """现货 pair 编号（@107） -> BASE/QUOTE，带 5 分钟缓存。"""
+        return self._spot_pair_names.get()
+
+    def coin_label(self, coin):
+        return spot_coin_label(coin, self._spot_name_map())
 
     @staticmethod
     def _extract_tpsl_orders(orders):
@@ -987,13 +974,14 @@ class AddressMonitor:
         if not isinstance(fill, dict):
             return
         coin = fill.get("coin", "?")
+        display_coin = self.coin_label(coin)
         side = fmt_side(fill.get("side"))
         direction = fmt_dir(fill.get("dir"))
         size = fmt_szi(fill.get("sz"))
         price = fill.get("px", "-")
         notional = abs(_num(size) * _num(price))
         text = (
-            f"[成交] {coin} {side} {size} @ {price}，"
+            f"[成交] {display_coin} {side} {size} @ {price}，"
             f"{direction}，成交额约 {fmt_usd_cn(notional)}"
         )
         self._emit(

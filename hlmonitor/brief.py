@@ -5,6 +5,7 @@ from __future__ import annotations
 import html
 import math
 
+from .assets import spot_coin_label
 from .format import fmt_qty, fmt_time, fmt_usd_cn, short_addr
 
 
@@ -455,12 +456,7 @@ def format_tpsl_report_html(
 
 
 def _spot_coin_label(coin, spot_names):
-    coin = str(coin or "?")
-    if coin.startswith("@"):
-        index = coin[1:]
-        name = (spot_names or {}).get(index)
-        return f"{name}（现货）" if name else f"现货{index}"
-    return coin
+    return spot_coin_label(coin, spot_names)
 
 
 def _is_uniform_ladder(group, min_orders=5, max_cv=0.30):

@@ -16,6 +16,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
+from .assets import spot_coin_label
 from .config import Config, normalize_address
 from .brief import (
     BRIEF_PAGE_SIZE,
@@ -480,7 +481,15 @@ def fill_stats_keyboard(
     return {"inline_keyboard": rows}
 
 
-def format_fill_stats_html(address, fills, window_min=5, now=None, page=0, page_size=10):
+def format_fill_stats_html(
+    address,
+    fills,
+    window_min=5,
+    now=None,
+    page=0,
+    page_size=10,
+    spot_names=None,
+):
     now = now or int(time.time() * 1000)
     cutoff = now - window_min * 60_000
     recent = [fill for fill in fills if int(fill.get("time") or 0) >= cutoff]
@@ -497,6 +506,7 @@ def format_fill_stats_html(address, fills, window_min=5, now=None, page=0, page_
     grouped = {}
     for fill in recent:
         coin = fill.get("coin", "?")
+        display_coin = spot_coin_label(coin, spot_names)
         size = abs(_as_float(fill.get("sz")))
         price = _as_float(fill.get("px"))
         bucket = (
@@ -579,7 +589,7 @@ def format_fill_stats_html(address, fills, window_min=5, now=None, page=0, page_
             f"<td>最近</td><td>{html.escape(fmt_time_min(stat['last_time']))}</td></tr>"
         )
         chunks.append(
-            f"<b>{html.escape(coin)} · {direction}</b>"
+            f"<b>{html.escape(display_coin)} · {direction}</b>"
             f"<table bordered compact>{rows}</table>"
         )
     head_text = "\n".join(lines)
@@ -588,7 +598,15 @@ def format_fill_stats_html(address, fills, window_min=5, now=None, page=0, page_
     return head_text + "\n\n" + "".join(chunks), total_pages
 
 
-def format_fill_timeline_html(address, fills, window_min=5, now=None, page=0, page_size=20):
+def format_fill_timeline_html(
+    address,
+    fills,
+    window_min=5,
+    now=None,
+    page=0,
+    page_size=20,
+    spot_names=None,
+):
     now = now or int(time.time() * 1000)
     cutoff = now - window_min * 60_000
     recent = [fill for fill in fills if int(fill.get("time") or 0) >= cutoff]
@@ -611,7 +629,7 @@ def format_fill_timeline_html(address, fills, window_min=5, now=None, page=0, pa
     )
     rows = []
     for fill in ordered[page * page_size : (page + 1) * page_size]:
-        coin = str(fill.get("coin") or "?")
+        coin = spot_coin_label(fill.get("coin"), spot_names)
         size = abs(_as_float(fill.get("sz")))
         price = _as_float(fill.get("px"))
         label = fmt_dir(fill.get("dir")) or fmt_side(fill.get("side"))
@@ -695,6 +713,7 @@ def format_fill_intervals_html(
     max_coins=10,
     max_clusters=6,
     max_page_len=3400,
+    spot_names=None,
 ):
     now = now or int(time.time() * 1000)
     cutoff = now - window_min * 60_000
@@ -777,7 +796,7 @@ def format_fill_intervals_html(
             if tables and tables[-1].startswith("…"):
                 break
         if tables:
-            blocks.append((coin, tables))
+            blocks.append((spot_coin_label(coin, spot_names), tables))
 
     pages = []
     current = []
@@ -1394,29 +1413,53 @@ class TelegramRouter:
 
         if view == "timeline":
             text, page_count = format_fill_timeline_html(
-                address, fills, window_min, page=page
+                address,
+                fills,
+                window_min,
+                page=page,
+                spot_names=self.monitor._spot_name_map(),
             )
         elif view == "interval":
             text, page_count = format_fill_intervals_html(
-                address, fills, window_min, page=page
+                address,
+                fills,
+                window_min,
+                page=page,
+                spot_names=self.monitor._spot_name_map(),
             )
         else:
             text, page_count = format_fill_stats_html(
-                address, fills, window_min, page=page
+                address,
+                fills,
+                window_min,
+                page=page,
+                spot_names=self.monitor._spot_name_map(),
             )
         if page >= page_count:
             page = page_count - 1
             if view == "timeline":
                 text, page_count = format_fill_timeline_html(
-                    address, fills, window_min, page=page
+                    address,
+                    fills,
+                    window_min,
+                    page=page,
+                    spot_names=self.monitor._spot_name_map(),
                 )
             elif view == "interval":
                 text, page_count = format_fill_intervals_html(
-                    address, fills, window_min, page=page
+                    address,
+                    fills,
+                    window_min,
+                    page=page,
+                    spot_names=self.monitor._spot_name_map(),
                 )
             else:
                 text, page_count = format_fill_stats_html(
-                    address, fills, window_min, page=page
+                    address,
+                    fills,
+                    window_min,
+                    page=page,
+                    spot_names=self.monitor._spot_name_map(),
                 )
         reply_markup = fill_stats_keyboard(
             address,
