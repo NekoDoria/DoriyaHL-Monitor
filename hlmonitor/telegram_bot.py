@@ -1830,6 +1830,14 @@ class TelegramBot:
                 data,
             )
             return
+        if data.startswith("fzp:"):
+            self._handle_fillzones_page_callback(
+                callback_id,
+                chat_id,
+                message_id,
+                data,
+            )
+            return
         if data.startswith("hq:"):
             self._handle_hunt_pick_callback(
                 callback_id,
@@ -4793,12 +4801,19 @@ class TelegramBot:
                 json.dumps(sorted(symbols), ensure_ascii=False),
                 now_ms,
             )
+            self.store.set_chat_setting(chat_id, self._fillzones_page_key(proc), "0", now_ms)
             view = str(self.store.get_chat_setting(chat_id, f"fillzones_view:{proc}", "table") or "table")
+            window_label = self._fillzones_window_label(window_min)
+            page_count = self._fillzones_page_count(
+                proc, symbols, rows, account_count, view, window_label
+            )
             text = self._format_fillzones_view(
                 proc, symbols, rows, account_count, view,
-                window_label=self._fillzones_window_label(window_min),
+                window_label=window_label,
             )
-            keyboard = self._fillzones_keyboard(proc, view, window_min)
+            keyboard = self._fillzones_keyboard(
+                proc, view, window_min, 0, page_count
+            )
             if placeholder_id is not None:
                 try:
                     self.client.edit_message_text(
@@ -4922,83 +4937,132 @@ class TelegramBot:
         return rows, account_count
 
     def _format_fillzones_view(
+        self, proc, symbols, rows, account_count, view, window_label=None,
+        page=0,
+    ):
+        pages, page = self._fillzones_pages(
+            proc, symbols, rows, account_count, view, window_label, page
+        )
+        return pages[page]
+
+    def _fillzones_page_count(
         self, proc, symbols, rows, account_count, view, window_label=None
     ):
-        summary = f"统计账户：{account_count} 个 · 标的：{'、'.join(sorted(symbols))} · 每账户最近 2000 笔"
+        pages, _ = self._fillzones_pages(
+            proc, symbols, rows, account_count, view, window_label, 0
+        )
+        return len(pages)
+
+    @staticmethod
+    def _compact_zone_summary(account_count, symbols, suffix=""):
+        names = sorted(dict.fromkeys(str(item) for item in symbols if str(item)))
+        label = "、".join(names)
+        if len(label) > 280:
+            label = f"{len(names)} 个"
+        summary = f"统计账户：{account_count} 个 · 标的：{label}"
+        if suffix:
+            summary += f" · {suffix}"
+        return summary
+
+    @staticmethod
+    def _pack_zone_blocks(blocks, overhead=256, max_chars=3300):
+        """Pack rendered coin blocks into Telegram-sized pages."""
+        pages = []
+        current = []
+        current_len = max(256, overhead)
+        for block in blocks:
+            block_len = len(block) + 2
+            if current and current_len + block_len > max_chars:
+                pages.append("\n\n".join(current))
+                current = []
+                current_len = max(256, overhead)
+            current.append(block)
+            current_len += block_len
+        if current:
+            pages.append("\n\n".join(current))
+        return pages or ["当前没有可展示的密集区间"]
+
+    def _fillzones_pages(
+        self, proc, symbols, rows, account_count, view, window_label=None,
+        page=0,
+    ):
+        title = (
+            f"<b>自动猎手 {html.escape(str(proc))} · "
+            f"成交密集区间（{'图形' if view == 'graph' else '表格'}）</b>"
+        )
+        suffix = "每账户最近 2000 笔"
         if window_label:
-            summary += f" · 窗口：{window_label}"
+            suffix += f" · 窗口：{window_label}"
+        summary = self._compact_zone_summary(account_count, symbols, suffix)
+        footer = "🟢 = 买入 · 🔴 = 卖出；每个标的内按价格从高到低排列。"
+
+        blocks = []
+        coins = list(dict.fromkeys(str(row.get("coin") or "?") for row in rows))
+        for coin in coins:
+            coin_rows = sorted(
+                (row for row in rows if str(row.get("coin") or "?") == coin),
+                key=lambda row: row.get("max_px", 0),
+                reverse=True,
+            )
+            if coin_rows:
+                blocks.append(self._fillzones_coin_block(view, coin, coin_rows))
+
+        pages = self._pack_zone_blocks(blocks, len(title + summary + footer) + 160)
+        page_count = len(pages)
+        page = max(0, min(int(page), page_count - 1))
+        rendered = []
+        for index, body in enumerate(pages):
+            lines = [title, summary]
+            if page_count > 1:
+                lines.append(f"第 {index + 1}/{page_count} 页")
+            rendered.append("\n".join(lines) + "\n\n" + body + "\n\n" + footer)
+        return rendered, page
+
+    def _fillzones_coin_block(self, view, coin, coin_rows):
+        safe_coin = html.escape(str(coin))
         if view == "graph":
-            return self._format_fillzones_graph(proc, rows, summary)
-        return self._format_fillzones_table(proc, rows, summary)
+            max_value = max(float(row.get("value") or 0) for row in coin_rows) or 1
+            chart = []
+            for row in coin_rows:
+                bar_len = max(1, round(float(row.get("value") or 0) / max_value * 22))
+                if float(row.get("max_px") or 0) >= 1000:
+                    price = f"{float(row.get('min_px') or 0):,.0f}-{float(row.get('max_px') or 0):,.0f}"
+                else:
+                    price = f"{float(row.get('min_px') or 0):,.2f}-{float(row.get('max_px') or 0):,.2f}"
+                side = self._fill_side_marker(row.get("side"))
+                bar = "-" * bar_len
+                chart.append(f"{side} {price} {bar} | {fmt_usd_cn(row.get('value') or 0)}")
+            return (
+                f"<b>{safe_coin}</b>\n<pre>"
+                + "\n".join(html.escape(row) for row in chart)
+                + "</pre>"
+            )
+
+        lines = [
+            f"<b>{safe_coin}</b>",
+            "<table bordered compact>",
+            "<tr><td></td><td>价格区间</td><td>笔数/账户</td><td>成交额</td></tr>",
+        ]
+        for row in coin_rows:
+            marker = self._fill_side_marker(row.get("side"))
+            if float(row.get("max_px") or 0) >= 1000:
+                price = f"{float(row.get('min_px') or 0):,.0f} - {float(row.get('max_px') or 0):,.0f}"
+            else:
+                price = f"{float(row.get('min_px') or 0):,.2f} - {float(row.get('max_px') or 0):,.2f}"
+            lines.append(
+                "<tr>"
+                f"<td>{marker}</td>"
+                f"<td>{price}</td>"
+                f"<td>{int(row.get('fills') or 0)}笔/{int(row.get('accounts') or 0)}户</td>"
+                f"<td>{fmt_usd_cn(row.get('value') or 0)}</td>"
+                "</tr>"
+            )
+        lines.append("</table>")
+        return "\n".join(lines)
 
     @staticmethod
     def _fill_side_marker(side):
         return "🟢" if str(side) == "买入" else "🔴"
-
-    def _format_fillzones_table(self, proc, rows, summary):
-        lines = [f"<b>自动猎手 {proc} · 成交密集区间（表格）</b>", summary]
-        coins = list(dict.fromkeys(r["coin"] for r in rows))
-        for coin in coins:
-            coin_rows = sorted(
-                (r for r in rows if r["coin"] == coin),
-                key=lambda r: r["max_px"],
-                reverse=True,
-            )
-            if not coin_rows:
-                continue
-            lines.append(f"<b>{coin}</b>")
-            lines.append("<table bordered compact>")
-            lines.append(
-                "<tr><td></td><td>价格区间</td><td>笔数/账户</td><td>成交额</td></tr>"
-            )
-            for item in coin_rows:
-                marker = self._fill_side_marker(item["side"])
-                if item["max_px"] >= 1000:
-                    price = f"{item['min_px']:,.0f} - {item['max_px']:,.0f}"
-                else:
-                    price = f"{item['min_px']:,.2f} - {item['max_px']:,.2f}"
-                lines.append(
-                    "<tr>"
-                    f"<td>{marker}</td>"
-                    f"<td>{price}</td>"
-                    f"<td>{item['fills']}笔/{item['accounts']}户</td>"
-                    f"<td>{fmt_usd_cn(item['value'])}</td>"
-                    "</tr>"
-                )
-            lines.append("</table>")
-        lines.append("🟢 = 买入 · 🔴 = 卖出；每个标的内按价格从高到低排列。")
-        return "\n".join(lines)
-
-    def _format_fillzones_graph(self, proc, rows, summary):
-        lines = [
-            f"<b>自动猎手 {proc} · 成交密集区间（图形）</b>",
-            summary,
-        ]
-        coins = list(dict.fromkeys(r["coin"] for r in rows))
-        for coin in coins:
-            coin_rows = sorted(
-                (r for r in rows if r["coin"] == coin),
-                key=lambda r: r["max_px"],
-                reverse=True,
-            )
-            if not coin_rows:
-                continue
-            lines.append(f"<b>{coin}</b>")
-            max_value = max(r["value"] for r in coin_rows) or 1
-            width = 22
-            chart = []
-            for item in coin_rows:
-                bar_len = max(1, round(item["value"] / max_value * width))
-                if item["max_px"] >= 1000:
-                    price = f"{item['min_px']:,.0f}-{item['max_px']:,.0f}"
-                else:
-                    price = f"{item['min_px']:,.2f}-{item['max_px']:,.2f}"
-                marker = self._fill_side_marker(item["side"])
-                bar = "-" * bar_len
-                chart.append(f"{marker} {price} {bar} | {fmt_usd_cn(item['value'])}")
-            lines.append("<pre>" + "\n".join(html.escape(row) for row in chart) + "</pre>")
-        lines.append("🟢 = 买入 · 🔴 = 卖出；每个标的内按价格从高到低排列。")
-        return "\n".join(lines)
 
     @staticmethod
     def _fillzones_window_label(window_min):
@@ -5006,7 +5070,7 @@ class TelegramBot:
             return "全部（最新 2000 笔）"
         return dict(FILL_WINDOWS).get(int(window_min), f"{int(window_min)}分钟")
 
-    def _fillzones_keyboard(self, proc, view, window_min=60):
+    def _fillzones_keyboard(self, proc, view, window_min=60, page=0, page_count=1):
         rows = []
         current = []
         for minutes, label in [(0, "全部")] + list(FILL_WINDOWS):
@@ -5022,6 +5086,22 @@ class TelegramBot:
         target = "graph" if view == "table" else "table"
         label = "📈 图形视图" if view == "table" else "📊 表格视图"
         rows.append([{"text": label, "callback_data": f"fz:{proc}:{target}"}])
+        page = max(0, int(page))
+        page_count = max(1, int(page_count))
+        if page_count > 1:
+            rows.append(
+                [
+                    {
+                        "text": "◀️ 上一页",
+                        "callback_data": f"fzp:{proc}:{max(0, page - 1)}",
+                    },
+                    {"text": f"{page + 1}/{page_count}", "callback_data": "ignore"},
+                    {
+                        "text": "下一页 ▶️",
+                        "callback_data": f"fzp:{proc}:{min(page_count - 1, page + 1)}",
+                    },
+                ]
+            )
         return {"inline_keyboard": rows}
 
     def _handle_fillzones_view_callback(self, callback_id, chat_id, message_id, data):
@@ -5054,15 +5134,25 @@ class TelegramBot:
             window_min = int(float(str(self.store.get_chat_setting(chat_id, f"fillzones_window:{proc}", "0"))))
         except (TypeError, ValueError):
             window_min = 60
+        window_label = self._fillzones_window_label(window_min)
+        try:
+            page = int(self.store.get_chat_setting(chat_id, self._fillzones_page_key(proc), 0))
+        except (TypeError, ValueError):
+            page = 0
+        page_count = self._fillzones_page_count(
+            proc, symbols, rows, account_count, view, window_label
+        )
+        page = max(0, min(page, page_count - 1))
         text = self._format_fillzones_view(
             proc,
             symbols,
             rows,
             account_count,
             view,
-            window_label=self._fillzones_window_label(window_min),
+            window_label=window_label,
+            page=page,
         )
-        keyboard = self._fillzones_keyboard(proc, view, window_min)
+        keyboard = self._fillzones_keyboard(proc, view, window_min, page, page_count)
         try:
             self.client.edit_message_text(
                 chat_id,
@@ -5077,6 +5167,74 @@ class TelegramBot:
             return
         self.client.answer_callback_query(callback_id)
 
+    def _fillzones_page_key(self, proc):
+        return f"fillzones_page:{proc}"
+
+    def _handle_fillzones_page_callback(self, callback_id, chat_id, message_id, data):
+        try:
+            _, proc, page_text = data.split(":", 2)
+            page = int(page_text)
+        except (ValueError, IndexError):
+            self.client.answer_callback_query(callback_id)
+            return
+        raw_rows = self.store.get_chat_setting(chat_id, self._fillzones_ctx_key(proc), None)
+        raw_symbols = self.store.get_chat_setting(chat_id, f"fillzones_symbols:{proc}", None)
+        if not raw_rows or not raw_symbols:
+            self.client.answer_callback_query(callback_id, "请先重新运行 /fillzones。")
+            return
+        try:
+            rows = json.loads(raw_rows)
+            symbols = json.loads(raw_symbols)
+        except (TypeError, ValueError):
+            self.client.answer_callback_query(callback_id, "缓存已失效，请重新运行 /fillzones。")
+            return
+        account_count = len(
+            {str(a.get("address", "")) for a in self.store.get_auto_accounts(chat_id, proc)}
+        )
+        try:
+            view = str(self.store.get_chat_setting(chat_id, f"fillzones_view:{proc}", "table") or "table")
+        except Exception:
+            view = "table"
+        if view not in {"table", "graph"}:
+            view = "table"
+        try:
+            window_min = int(float(str(self.store.get_chat_setting(chat_id, f"fillzones_window:{proc}", "0"))))
+        except (TypeError, ValueError):
+            window_min = 0
+        window_label = self._fillzones_window_label(window_min)
+        page_count = self._fillzones_page_count(
+            proc, symbols, rows, account_count, view, window_label
+        )
+        page = max(0, min(page, page_count - 1))
+        self.store.set_chat_setting(
+            chat_id,
+            self._fillzones_page_key(proc),
+            str(page),
+            int(time.time() * 1000),
+        )
+        text = self._format_fillzones_view(
+            proc,
+            symbols,
+            rows,
+            account_count,
+            view,
+            window_label=window_label,
+            page=page,
+        )
+        keyboard = self._fillzones_keyboard(proc, view, window_min, page, page_count)
+        try:
+            self.client.edit_message_text(
+                chat_id,
+                message_id,
+                text,
+                reply_markup=keyboard,
+                parse_mode="HTML",
+            )
+        except Exception as exc:
+            print(f"[fillzones] page switch failed: {exc}")
+            self.client.answer_callback_query(callback_id, "翻页失败，请重试。")
+            return
+        self.client.answer_callback_query(callback_id)
 
     def _handle_fillzones_window_callback(self, callback_id, chat_id, message_id, data):
         try:
@@ -5126,6 +5284,7 @@ class TelegramBot:
                 return
             ts = int(time.time() * 1000)
             self.store.set_chat_setting(chat_id, self._fillzones_ctx_key(proc), json.dumps(rows), ts)
+            self.store.set_chat_setting(chat_id, self._fillzones_page_key(proc), "0", ts)
             if not rows:
                 scope = "、".join(sorted(symbols))
                 try:
@@ -5138,15 +5297,21 @@ class TelegramBot:
                     pass
                 self.client.answer_callback_query(callback_id)
                 return
+            window_label = self._fillzones_window_label(window_min)
+            page_count = self._fillzones_page_count(
+                proc, symbols, rows, account_count, view, window_label
+            )
             text = self._format_fillzones_view(
                 proc,
                 symbols,
                 rows,
                 account_count,
                 view,
-                window_label=self._fillzones_window_label(window_min),
+                window_label=window_label,
             )
-            keyboard = self._fillzones_keyboard(proc, view, window_min)
+            keyboard = self._fillzones_keyboard(
+                proc, view, window_min, 0, page_count
+            )
             try:
                 self.client.edit_message_text(
                     chat_id,
