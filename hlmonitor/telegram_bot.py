@@ -4641,6 +4641,7 @@ class TelegramBot:
         if window_min:
             cutoff = int(time.time() * 1000) - int(window_min) * 60000
 
+        errors = []
         def fetch_fills(account):
             address = str(account.get("address", ""))
             try:
@@ -4648,19 +4649,33 @@ class TelegramBot:
                     fills = api.user_fills(address) or []
                 else:
                     fills = []
+                    start = cutoff
                     end = int(time.time() * 1000) + 1000
-                    for _ in range(4):
-                        batch = api.user_fills_by_time(address, cutoff, end) or []
+                    last_exc = None
+                    for page in range(6):
+                        batch = None
+                        for attempt in range(3):
+                            try:
+                                batch = api.user_fills_by_time(address, start, end) or []
+                                break
+                            except Exception as exc:
+                                last_exc = exc
+                                time.sleep(0.6 * (attempt + 1))
+                        if batch is None:
+                            raise last_exc or RuntimeError("fill fetch failed")
                         if not batch:
                             break
                         fills.extend(batch)
                         if len(batch) < 2000 or len(fills) >= 8000:
                             break
-                        times = [int(item.get("time") or 0) for item in batch if item.get("time")]
+                        times = sorted(int(item.get("time") or 0) for item in batch if item.get("time"))
                         if not times:
                             break
-                        end = min(times) - 1
-            except Exception:
+                        start = times[-1] + 1
+                        if start >= end:
+                            break
+            except Exception as exc:
+                errors.append((address, exc))
                 return []
             out = []
             for fill in fills:
@@ -4694,6 +4709,8 @@ class TelegramBot:
             for account in accounts[:40]:
                 flat.extend(fetch_fills(account))
 
+        if not flat and errors:
+            raise RuntimeError(f"拉取成交失败 {len(errors)}/{min(len(accounts), 40)} 个账户")
         clusters = _cluster_fills_by_price(flat)
         rows = []
         for cluster in clusters:
