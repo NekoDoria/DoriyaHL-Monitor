@@ -59,12 +59,15 @@ python -m hlmonitor.tgbot
 /tpsl [0x地址]
 /orders [0x地址]
 /recent [条数]
+/update
 /coins
 /mute
 /unmute
 ```
 
 告警会发送到添加地址时所在的聊天。`chat_id` 留空时，只要在聊天里添加地址即可；`allowed_chat_ids` 可用于限制只有指定聊天可以使用 Bot。
+
+`/update` 会从当前 Git 分支的 `origin` 拉取最新版本，做快进更新；如果 `requirements.txt` 有变化会先安装依赖，语法自检通过后自动重启。这个命令只允许 `update_admin_chat_ids` 里的聊天使用；未配置时回落到 `allowed_chat_ids` 和 `chat_id`。如果三个配置都为空，为了安全，`/update` 会拒绝执行。注意：如果更新修改了 `deploy/hlmonitor.service`，仍需要手动执行 `sudo systemctl daemon-reload && sudo systemctl restart hlmonitor`。
 
 持仓变化会合并成一条简报，而不是每个币种分别发送。每条简报下方有两个按钮，可以直接切换按仓位价值或按开仓时间排序。
 

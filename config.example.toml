@@ -28,6 +28,7 @@ format = "generic"             # generic / discord / slack
 bot_token = ""                # Telegram Bot token，用于交互式 Bot
 chat_id = ""                  # 可选：无聊天订阅时兜底接收告警的 chat_id
 allowed_chat_ids = []         # 可选：只允许这些 chat_id 使用 Bot；留空表示允许所有
+update_admin_chat_ids = []    # 可选：只允许这些 chat_id 使用 /update；留空时回落到 allowed_chat_ids
 
 [rules]
 account_value_change_pct = 1.0   # 账户净值变化达到该百分比时告警

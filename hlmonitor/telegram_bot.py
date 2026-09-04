@@ -5,8 +5,12 @@ from __future__ import annotations
 import json
 import html
 import math
+import os
+import subprocess
+import sys
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from pathlib import Path
 import time
 import urllib.error
 import urllib.parse
@@ -50,6 +54,7 @@ HELP_TEXT = """Hyperliquid 地址监控 Bot
 /tpsl [0x地址] — 止盈止损单
 /orders [0x地址] — 普通挂单密集区间
 /recent [条数] — 最近事件
+/update — 拉取 GitHub 最新版本并重启
 
 Hunt 系列
 /hunt [数量] — 手动扫描大户（可先选标的）
@@ -943,6 +948,8 @@ class TelegramClient:
                     rich["reply_markup"] = reply_markup
                 return self._call("editMessageText", rich)
             except Exception as exc:
+                if "message is not modified" in str(exc).lower():
+                    return None
                 print(f"[telegram] editMessageText(rich) 失败，回退旧格式: {exc}")
         return self._call("editMessageText", payload)
 
@@ -972,6 +979,8 @@ class TelegramRouter:
         self._fill_dirty = set()
         self._fill_timer = None
         self._api_fill_cache = {}
+        self._panel_locks = {}
+        self._panel_locks_guard = threading.Lock()
 
     def _subscriptions_for_chat(self, chat_id):
         return self.store.get_subscriptions(chat_id=chat_id, active_only=False)
@@ -1017,6 +1026,11 @@ class TelegramRouter:
             int(time.time() * 1000),
         )
         return selected
+
+    def _panel_lock(self, chat_id, key):
+        lock_key = (str(chat_id), key)
+        with self._panel_locks_guard:
+            return self._panel_locks.setdefault(lock_key, threading.RLock())
 
     def notify(self, event):
         address = event.get("address", "")
@@ -1109,57 +1123,58 @@ class TelegramRouter:
             selected_address=selected_address or address,
         )
         key = "live_brief_panel"
-        message_id = self.store.get_chat_setting(chat_id, key, None)
+        with self._panel_lock(chat_id, key):
+            message_id = self.store.get_chat_setting(chat_id, key, None)
 
-        if target_message_id is not None:
-            try:
-                self.client.edit_message_text(
-                    chat_id,
-                    int(target_message_id),
-                    text,
-                    reply_markup=reply_markup,
-                    parse_mode="HTML",
-                )
+            if target_message_id is not None:
+                try:
+                    self.client.edit_message_text(
+                        chat_id,
+                        int(target_message_id),
+                        text,
+                        reply_markup=reply_markup,
+                        parse_mode="HTML",
+                    )
+                    self.store.set_chat_setting(
+                        chat_id,
+                        key,
+                        str(target_message_id),
+                        int(time.time() * 1000),
+                    )
+                except Exception as exc:
+                    print(f"[telegram] 更新指定简报失败: {exc}")
+                return
+
+            if force_new:
+                message_id = None
+
+            if message_id is not None:
+                try:
+                    self.client.edit_message_text(
+                        chat_id,
+                        int(message_id),
+                        text,
+                        reply_markup=reply_markup,
+                        parse_mode="HTML",
+                    )
+                    return
+                except Exception as exc:
+                    print(f"[telegram] 实时消息已失效，重新发送: {exc}")
+
+            result = self.client.send_message(
+                chat_id,
+                text,
+                reply_markup=reply_markup,
+                parse_mode="HTML",
+            )
+            new_message_id = (result or {}).get("message_id")
+            if new_message_id is not None:
                 self.store.set_chat_setting(
                     chat_id,
                     key,
-                    str(target_message_id),
+                    str(new_message_id),
                     int(time.time() * 1000),
                 )
-            except Exception as exc:
-                print(f"[telegram] 更新指定简报失败: {exc}")
-            return
-
-        if force_new:
-            message_id = None
-
-        if message_id is not None:
-            try:
-                self.client.edit_message_text(
-                    chat_id,
-                    int(message_id),
-                    text,
-                    reply_markup=reply_markup,
-                    parse_mode="HTML",
-                )
-                return
-            except Exception as exc:
-                print(f"[telegram] 实时消息已失效，重新发送: {exc}")
-
-        result = self.client.send_message(
-            chat_id,
-            text,
-            reply_markup=reply_markup,
-            parse_mode="HTML",
-        )
-        new_message_id = (result or {}).get("message_id")
-        if new_message_id is not None:
-            self.store.set_chat_setting(
-                chat_id,
-                key,
-                str(new_message_id),
-                int(time.time() * 1000),
-            )
 
     def _should_notify_chat(self, event, chat_id):
         if event.get("kind") != "fill":
@@ -1416,44 +1431,45 @@ class TelegramRouter:
             page_count=page_count,
         )
         key = "live_fill_stats_panel"
-        message_id = self.store.get_chat_setting(chat_id, key, None)
-        if force_new:
-            message_id = None
-        if target_message_id is not None:
-            message_id = target_message_id
-        if message_id is not None:
-            try:
-                self.client.edit_message_text(
-                    chat_id,
-                    int(message_id),
-                    text,
-                    reply_markup=reply_markup,
-                    parse_mode="HTML",
-                )
+        with self._panel_lock(chat_id, key):
+            message_id = self.store.get_chat_setting(chat_id, key, None)
+            if force_new:
+                message_id = None
+            if target_message_id is not None:
+                message_id = target_message_id
+            if message_id is not None:
+                try:
+                    self.client.edit_message_text(
+                        chat_id,
+                        int(message_id),
+                        text,
+                        reply_markup=reply_markup,
+                        parse_mode="HTML",
+                    )
+                    self.store.set_chat_setting(
+                        chat_id,
+                        key,
+                        str(message_id),
+                        int(time.time() * 1000),
+                    )
+                    return
+                except Exception as exc:
+                    print(f"[telegram] 成交统计消息已失效，重新发送: {exc}")
+
+            result = self.client.send_message(
+                chat_id,
+                text,
+                reply_markup=reply_markup,
+                parse_mode="HTML",
+            )
+            new_message_id = (result or {}).get("message_id")
+            if new_message_id is not None:
                 self.store.set_chat_setting(
                     chat_id,
                     key,
-                    str(message_id),
+                    str(new_message_id),
                     int(time.time() * 1000),
                 )
-                return
-            except Exception as exc:
-                print(f"[telegram] 成交统计消息已失效，重新发送: {exc}")
-
-        result = self.client.send_message(
-            chat_id,
-            text,
-            reply_markup=reply_markup,
-            parse_mode="HTML",
-        )
-        new_message_id = (result or {}).get("message_id")
-        if new_message_id is not None:
-            self.store.set_chat_setting(
-                chat_id,
-                key,
-                str(new_message_id),
-                int(time.time() * 1000),
-            )
 
     def _format_for_chat(self, event, chat_id):
         kind = event.get("kind", "event")
@@ -1495,6 +1511,7 @@ class TelegramBot:
         )
         if monitor is None:
             self.monitor.notifier = self.router
+        self.project_root = Path(__file__).resolve().parents[1]
         self._stop = threading.Event()
         self._poll_thread = None
         self._update_offset = None
@@ -2353,6 +2370,130 @@ class TelegramBot:
             return
         self.client.answer_callback_query(callback_id)
 
+    def _update_allowed(self, chat_id):
+        telegram = self.config.alerts.get("telegram", {})
+        admins = {
+            str(item).strip()
+            for item in (telegram.get("update_admin_chat_ids") or [])
+            if str(item).strip()
+        }
+        if admins:
+            return str(chat_id) in admins
+        return str(chat_id) in self.allowed_chat_ids or (
+            bool(self.fallback_chat_id) and str(chat_id) == self.fallback_chat_id
+        )
+
+    def _run_process(self, command, timeout=120):
+        env = {**os.environ, "GIT_TERMINAL_PROMPT": "0"}
+        return subprocess.run(
+            command,
+            cwd=self.project_root,
+            env=env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=timeout,
+            check=False,
+        )
+
+    def _git_output(self, args, timeout=30):
+        result = self._run_process(["git", *args], timeout=timeout)
+        if result.returncode != 0:
+            output = (result.stdout or "").strip()
+            raise RuntimeError(output or f"git {' '.join(args)} 失败")
+        return (result.stdout or "").strip()
+
+    def _cmd_update(self, chat_id):
+        if not self._update_allowed(chat_id):
+            self.client.send_message(
+                chat_id,
+                "没有权限使用 /update。请先在配置中把你的 chat_id 加到 "
+                "update_admin_chat_ids 或 allowed_chat_ids。",
+            )
+            return
+
+        def work():
+            try:
+                if getattr(sys, "frozen", False):
+                    raise RuntimeError("打包版不支持 /update，请使用源码部署。")
+                if not (self.project_root / ".git").exists():
+                    raise RuntimeError("安装目录不是 Git 仓库，请改用 git clone 部署。")
+
+                old_head = self._git_output(["rev-parse", "HEAD"])
+                branch = self._git_output(["rev-parse", "--abbrev-ref", "HEAD"])
+                if branch in {"HEAD", ""}:
+                    raise RuntimeError("当前不在分支上，请先切回 main。")
+                self.client.send_message(chat_id, f"⏳ 正在检查 origin/{branch} 更新…")
+                self._git_output(["fetch", "--prune", "origin", branch])
+                remote_branch = f"origin/{branch}"
+                new_head = self._git_output(["rev-parse", remote_branch])
+                if old_head == new_head:
+                    self.client.send_message(chat_id, f"✅ 已是最新版本：{old_head[:10]}")
+                    return
+
+                merge_check = self._run_process(
+                    ["git", "merge-base", "--is-ancestor", old_head, new_head]
+                )
+                if merge_check.returncode != 0:
+                    raise RuntimeError("本地提交无法快进更新，请手动处理。")
+
+                requirement_diff = self._git_output(
+                    ["diff", "--name-only", old_head, new_head, "--", "requirements.txt"]
+                )
+                self.client.send_message(
+                    chat_id,
+                    f"⬇️ 发现更新 {old_head[:10]}..{new_head[:10]}，正在拉取…",
+                )
+                self._git_output(["pull", "--ff-only", "origin", branch], timeout=180)
+
+                if requirement_diff:
+                    self.client.send_message(chat_id, "📦 依赖有变化，正在安装…")
+                    candidates = (
+                        [self.project_root / ".venv" / "bin" / "python"]
+                        if os.name != "nt"
+                        else [self.project_root / ".venv" / "Scripts" / "python.exe"]
+                    )
+                    candidates.append(Path(sys.executable))
+                    python_exe = next((item for item in candidates if item.exists()), None)
+                    if python_exe is None:
+                        raise RuntimeError("找不到 Python 可执行文件。")
+                    result = self._run_process(
+                        [
+                            str(python_exe),
+                            "-m",
+                            "pip",
+                            "install",
+                            "--disable-pip-version-check",
+                            "-r",
+                            str(self.project_root / "requirements.txt"),
+                        ],
+                        timeout=600,
+                    )
+                    if result.returncode != 0:
+                        raise RuntimeError(f"依赖安装失败:\n{(result.stdout or '').strip()}")
+
+                check = self._run_process(
+                    [sys.executable, "-m", "compileall", "-q", "hlmonitor"]
+                )
+                if check.returncode != 0:
+                    raise RuntimeError(f"更新后语法自检失败:\n{(check.stdout or '').strip()}")
+
+                self.client.send_message(chat_id, "✅ 更新完成，正在重启…")
+                self.stop()
+                os.execv(
+                    sys.executable,
+                    [sys.executable, "-m", "hlmonitor.tgbot", *sys.argv[1:]],
+                )
+            except Exception as exc:
+                detail = str(exc).strip()
+                if len(detail) > 2400:
+                    detail = detail[-2400:]
+                self.client.send_message(chat_id, f"❌ 更新失败: {detail}")
+
+        self._async(work)
+
     def _dispatch(self, chat_id, command, args):
         if command in {"/start", "/help"}:
             self.client.send_message(chat_id, HELP_TEXT)
@@ -2397,6 +2538,8 @@ class TelegramBot:
                 self._cmd_orders(chat_id, args)
         elif command == "/recent":
             self._cmd_recent(chat_id, args)
+        elif command == "/update":
+            self._cmd_update(chat_id)
         elif command == "/coins":
             self._cmd_coins(chat_id)
         elif command == "/sort":
