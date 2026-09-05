@@ -163,6 +163,8 @@ def brief_keyboard(
 
 COIN_PAGE_SIZE = 20
 COIN_COLS = 5
+FILLZONE_MAX_ROWS = 200
+FILLZONE_BLOCK_ROWS = 24
 
 MAIN_COINS = [
     "BTC",
@@ -4932,7 +4934,7 @@ class TelegramBot:
                 }
             )
         rows.sort(key=lambda item: (item["accounts"], item["value"]), reverse=True)
-        rows = rows[:20]
+        rows = rows[:FILLZONE_MAX_ROWS]
         account_count = len({str(a.get("address", "")) for a in accounts[:40]})
         return rows, account_count
 
@@ -5004,8 +5006,13 @@ class TelegramBot:
                 key=lambda row: row.get("max_px", 0),
                 reverse=True,
             )
-            if coin_rows:
-                blocks.append(self._fillzones_coin_block(view, coin, coin_rows))
+            chunks = [
+                coin_rows[start : start + FILLZONE_BLOCK_ROWS]
+                for start in range(0, len(coin_rows), FILLZONE_BLOCK_ROWS)
+            ]
+            for index, chunk in enumerate(chunks, 1):
+                display_coin = coin if len(chunks) == 1 else f"{coin} · {index}/{len(chunks)}"
+                blocks.append(self._fillzones_coin_block(view, display_coin, chunk))
 
         pages = self._pack_zone_blocks(blocks, len(title + summary + footer) + 160)
         page_count = len(pages)
