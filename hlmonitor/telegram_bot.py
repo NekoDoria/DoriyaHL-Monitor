@@ -3144,7 +3144,7 @@ class TelegramBot:
             self.client.edit_message_text(
                 chat_id,
                 message_id,
-                "设置自动猎手：选择要追踪的标的（可多选）"
+                "选择要追踪的标的（可多选）"
                 if auto_setup
                 else "选择要统计胜率的标的（可多选）；选「综合」则按全部交易计算：",
                 reply_markup=hunt_category_keyboard(self._hunt_swing_enabled(chat_id)),
@@ -4186,13 +4186,13 @@ class TelegramBot:
             if not names:
                 self.client.send_message(
                     chat_id,
-                    "还没有自动猎手进程。\n"
+                    "还没有进程。\n"
                     "用法：/autohunt new 名称\n"
                     "例如：/autohunt new btc\n"
                     "然后按提示选标的、回复“数量 间隔小时”。",
                 )
                 return
-            lines = ["自动猎手进程："]
+            lines = ["进程："]
             for name in sorted(names):
                 cfg = self._auto_config(chat_id, name)
                 if not cfg:
@@ -4277,7 +4277,7 @@ class TelegramBot:
         self.client.send_message(
             chat_id,
             "用法：\n"
-            "/autohunt new 名称 - 新建一个自动猎手进程\n"
+            "/autohunt new 名称 - 新建进程\n"
             "/autohunt list - 查看所有进程\n"
             "/autohunt on|off|now|del|progress [名称] - 启动/停止/立即跑/删除/查进度（一个时可省略名称）\n"
             "查看挂单区：/zones 进程名 [标的]",
@@ -4323,7 +4323,7 @@ class TelegramBot:
     def _start_auto_scan(self, chat_id, name, manual=False):
         if not self._auto_run_lock.acquire(blocking=False):
             if manual:
-                self.client.send_message(chat_id, "已经有一轮自动猎手在跑，稍后再试。")
+                self.client.send_message(chat_id, "已经有一轮在跑，稍后再试。")
             return
         if manual:
             self.client.send_message(chat_id, f"🔄 进程 {name} 开始扫描，完成后会通知你。")
@@ -4431,7 +4431,7 @@ class TelegramBot:
     def _cmd_zones(self, chat_id, args):
         names = self._autohunt_names(chat_id)
         if not names:
-            self.client.send_message(chat_id, "还没有自动猎手进程，先 /hunt auto new 名称。")
+            self.client.send_message(chat_id, "还没有进程，先 /hunt auto new 名称。")
             return
         parts = args.strip().split()
         proc = None
@@ -4445,7 +4445,7 @@ class TelegramBot:
         else:
             self.client.send_message(
                 chat_id,
-                "你有多个自动猎手进程，请指定：/orders hunt 进程名 [标的]，例如 /orders hunt btc BTC GOLD。\n"
+                "你有多个进程，请指定：/orders hunt 进程名 [标的]，例如 /orders hunt btc BTC GOLD。\n"
                 "进程：" + "、".join(sorted(names)),
             )
             return
@@ -4605,7 +4605,7 @@ class TelegramBot:
         return self._format_zones_table(proc, rows, summary)
 
     def _format_zones_table(self, proc, rows, summary):
-        lines = [f"<b>自动猎手 {proc} · 挂单密集区（表格）</b>", summary]
+        lines = [f"<b>{html.escape(str(proc))} · 挂单密集区（表格）</b>", summary]
         coins = list(dict.fromkeys(r["coin"] for r in rows))
         for coin in coins:
             coin_rows = sorted(
@@ -4639,7 +4639,7 @@ class TelegramBot:
         return "\n".join(lines)
 
     def _format_zones_graph(self, proc, rows, summary):
-        lines = [f"<b>自动猎手 {proc} · 挂单密集区（图形）</b>", summary]
+        lines = [f"<b>{html.escape(str(proc))} · 挂单密集区（图形）</b>", summary]
         coins = list(dict.fromkeys(r["coin"] for r in rows))
         for coin in coins:
             coin_rows = sorted(
@@ -4727,7 +4727,7 @@ class TelegramBot:
     def _cmd_fillzones(self, chat_id, args):
         names = self._autohunt_names(chat_id)
         if not names:
-            self.client.send_message(chat_id, "还没有自动猎手进程，先 /autohunt new 名称。")
+            self.client.send_message(chat_id, "还没有进程，先 /autohunt new 名称。")
             return
         parts = args.strip().split()
         proc = None
@@ -4741,7 +4741,7 @@ class TelegramBot:
         else:
             self.client.send_message(
                 chat_id,
-                "你有多个自动猎手进程，请指定：/fillzones 进程名 [标的]，例如 /fillzones btc BTC GOLD。\n"
+                "你有多个进程，请指定：/fillzones 进程名 [标的]，例如 /fillzones btc BTC GOLD。\n"
                 "进程：" + "、".join(sorted(names)),
             )
             return
@@ -4989,7 +4989,7 @@ class TelegramBot:
         page=0,
     ):
         title = (
-            f"<b>自动猎手 {html.escape(str(proc))} · "
+            f"<b>{html.escape(str(proc))} · "
             f"成交密集区间（{'图形' if view == 'graph' else '表格'}）</b>"
         )
         suffix = "每账户最近 2000 笔"
