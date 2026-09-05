@@ -4325,14 +4325,36 @@ class TelegramBot:
             if manual:
                 self.client.send_message(chat_id, "已经有一轮在跑，稍后再试。")
             return
+        progress_message_id = None
         if manual:
-            self.client.send_message(chat_id, f"🔄 进程 {name} 开始扫描，完成后会通知你。")
+            now_ms = int(time.time() * 1000)
+            key = self._auto_key
+            self.store.set_chat_setting(chat_id, key(name, "progress_running"), "1", now_ms)
+            self.store.set_chat_setting(chat_id, key(name, "progress_done"), "0", now_ms)
+            self.store.set_chat_setting(chat_id, key(name, "progress_total"), "0", now_ms)
+            try:
+                result = self.client.send_message(
+                    chat_id,
+                    self._autohunt_progress_text(chat_id, name),
+                )
+                progress_message_id = result.get("message_id") if isinstance(result, dict) else None
+            except Exception as exc:
+                print(f"[autohunt] failed to create progress message: {exc}")
 
         def run_locked(cid=chat_id, proc=name):
             try:
-                self._run_auto_scan(cid, proc)
+                self._run_auto_scan(cid, proc, progress_message_id)
             except Exception as exc:
                 print(f"[autohunt] scan failed {cid}/{proc}: {exc}")
+                if progress_message_id:
+                    try:
+                        self.client.edit_message_text(
+                            cid,
+                            progress_message_id,
+                            f"进程 {proc} 扫描失败: {exc}",
+                        )
+                    except Exception as edit_exc:
+                        print(f"[autohunt] failed to update progress: {edit_exc}")
             finally:
                 self.store.set_chat_setting(
                     cid,
@@ -4377,10 +4399,11 @@ class TelegramBot:
             lines.append("已停止")
         scope = "、".join(cfg["coins"]) if cfg["coins"] else "综合"
         lines.append(f"标的：{scope} · 每轮 {cfg['limit']} · 间隔 {cfg['interval_h']:g}h · 已收集 {len(accounts)}")
-        lines.append("/autohunt now " + name + " 可立即跑一轮")
+        if not running:
+            lines.append("/autohunt now " + name + " 可立即跑一轮")
         return "\n".join(lines)
 
-    def _run_auto_scan(self, chat_id, name):
+    def _run_auto_scan(self, chat_id, name, progress_message_id=None):
         cfg = self._auto_config(chat_id, name)
         if not cfg or not cfg["configured"]:
             return
@@ -4393,11 +4416,26 @@ class TelegramBot:
         since_ms = int(now_ms - max(skip_hours, 0.5) * 3600000)
         seen = self.store.recent_auto_scanned(chat_id, name, since_ms)
         scanned_out = []
+        last_progress_update = 0.0
         try:
             def progress(done, total, address):
+                nonlocal last_progress_update
                 ts = int(time.time() * 1000)
                 self.store.set_chat_setting(chat_id, key(name, "progress_done"), str(done), ts)
                 self.store.set_chat_setting(chat_id, key(name, "progress_total"), str(total), ts)
+                now = time.time()
+                if not progress_message_id or (now - last_progress_update < 1 and done < total):
+                    return
+                last_progress_update = now
+                try:
+                    self.client.edit_message_text(
+                        chat_id,
+                        progress_message_id,
+                        self._autohunt_progress_text(chat_id, name),
+                    )
+                except Exception as exc:
+                    print(f"[autohunt] progress update failed: {exc}")
+
             results = scan(
                 self.config,
                 self.monitor.api,
@@ -4416,11 +4454,17 @@ class TelegramBot:
             self.store.set_chat_setting(chat_id, key(name, "progress_running"), None, int(time.time() * 1000))
         total = len(self.store.get_auto_accounts(chat_id, name))
         scope = "、".join(cfg["coins"]) if cfg["coins"] else "综合"
-        self.client.send_message(
-            chat_id,
+        text = (
             f"进程 {name} 本轮完成：实际精算 {len(scanned_out)} 个（跳过近期已扫 {len(seen)} 个），"
-            f"新收录 {len(results)} 个账户（{scope}），自动列表共 {total} 个。\n用 /zones {name} 查看挂单密集区。",
+            f"新收录 {len(results)} 个账户（{scope}），自动列表共 {total} 个。\n用 /zones {name} 查看挂单密集区。"
         )
+        if progress_message_id:
+            try:
+                self.client.edit_message_text(chat_id, progress_message_id, text)
+                return
+            except Exception as exc:
+                print(f"[autohunt] failed to show result in progress: {exc}")
+        self.client.send_message(chat_id, text)
 
     # ---------- auto account order zones ----------
 
