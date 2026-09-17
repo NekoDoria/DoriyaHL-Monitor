@@ -152,6 +152,21 @@ CREATE TABLE IF NOT EXISTS whale_scan_history (
     score         REAL,
     PRIMARY KEY (chain, token, scanned_ms)
 );
+CREATE TABLE IF NOT EXISTS whale_txs (
+    chat_id      TEXT NOT NULL,
+    chain        TEXT NOT NULL,
+    token        TEXT NOT NULL,
+    address      TEXT NOT NULL,
+    tx_hash      TEXT NOT NULL,
+    ts           INTEGER NOT NULL DEFAULT 0,
+    direction    TEXT NOT NULL DEFAULT '',
+    counterparty TEXT NOT NULL DEFAULT '',
+    value        REAL,
+    asset        TEXT NOT NULL DEFAULT '',
+    url          TEXT NOT NULL DEFAULT '',
+    PRIMARY KEY (chat_id, chain, token, address, tx_hash)
+);
+CREATE INDEX IF NOT EXISTS idx_whale_txs_ts ON whale_txs(ts);
 CREATE TABLE IF NOT EXISTS app_settings (
     key        TEXT PRIMARY KEY,
     value      TEXT NOT NULL,
@@ -176,6 +191,12 @@ class EventStore:
             self._ensure_column("positions", "open_time_ms", "INTEGER")
             self._ensure_column("positions", "leverage", "TEXT")
             self._ensure_column("positions", "peak_notional", "TEXT")
+            self._ensure_column(
+                "whale_watches", "last_tx_ms", "INTEGER NOT NULL DEFAULT 0"
+            )
+            self._ensure_column(
+                "whale_watches", "tx_error", "TEXT NOT NULL DEFAULT ''"
+            )
             self.conn.commit()
 
     def _ensure_column(self, table, column, column_type):
@@ -655,6 +676,94 @@ class EventStore:
                 )
             self.conn.commit()
 
+    def mark_whale_watch_tx(
+        self,
+        chat_id,
+        chain,
+        token,
+        address,
+        checked_ms=None,
+        last_tx_ms=None,
+        error="",
+    ):
+        """记录成交监控结果。
+
+        last_tx_ms 为 None 时只更新错误信息，不推进游标。
+        """
+        fields = ["tx_error = ?"]
+        params = [str(error or "")]
+        if last_tx_ms is not None:
+            fields.append("last_tx_ms = ?")
+            params.append(int(last_tx_ms or 0))
+        params.extend(
+            [str(chat_id), str(chain), str(token), str(address)]
+        )
+        with self._lock:
+            self.conn.execute(
+                "UPDATE whale_watches SET "
+                + ", ".join(fields)
+                + " WHERE chat_id = ? AND chain = ? AND token = ? AND address = ?",
+                tuple(params),
+            )
+            self.conn.commit()
+
+    def save_whale_txs(self, chat_id, chain, token, address, rows, ts=None):
+        """写入链上成交明细，并保留最近 500 条。"""
+        if not rows:
+            return
+        with self._lock:
+            self.conn.executemany(
+                "INSERT OR IGNORE INTO whale_txs("
+                " chat_id, chain, token, address, tx_hash, ts, direction,"
+                " counterparty, value, asset, url) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                [
+                    (
+                        str(chat_id),
+                        str(chain),
+                        str(token),
+                        str(address),
+                        str(row.get("hash") or ""),
+                        int(row.get("time_ms") or 0),
+                        str(row.get("direction") or ""),
+                        str(row.get("counterparty") or ""),
+                        _as_float(row.get("value"), 0.0),
+                        str(row.get("asset") or ""),
+                        str(row.get("url") or ""),
+                    )
+                    for row in rows
+                    if row.get("hash")
+                ],
+            )
+            self.conn.execute(
+                "DELETE FROM whale_txs WHERE rowid NOT IN ("
+                " SELECT rowid FROM whale_txs ORDER BY ts DESC LIMIT 500)"
+            )
+            self.conn.commit()
+
+    def recent_whale_txs(self, chat_id, limit=50):
+        with self._lock:
+            rows = self.conn.execute(
+                "SELECT chain, token, address, tx_hash, ts, direction,"
+                " counterparty, value, asset, url FROM whale_txs"
+                " WHERE chat_id = ? ORDER BY ts DESC LIMIT ?",
+                (str(chat_id), int(limit)),
+            ).fetchall()
+        return [
+            {
+                "chain": row[0],
+                "token": row[1],
+                "address": row[2],
+                "hash": row[3],
+                "time": int(row[4] or 0),
+                "direction": row[5],
+                "counterparty": row[6],
+                "value": row[7],
+                "asset": row[8],
+                "url": row[9],
+            }
+            for row in rows
+        ]
+
     # ------------------------------------------------------------ 应用设置
 
     def get_app_settings(self):
@@ -693,7 +802,7 @@ class EventStore:
     WHALE_WATCH_COLUMNS = (
         "chat_id, chain, token, address, symbol, label, decimals, last_balance,"
         " last_checked_ms, last_error, interval_s, min_delta_pct, min_delta_abs,"
-        " enabled, created_ms"
+        " enabled, created_ms, last_tx_ms, tx_error"
     )
 
     WHALE_TOKEN_COLUMNS = (
@@ -719,6 +828,8 @@ class EventStore:
             "min_delta_abs": float(row[12] or 0.0),
             "enabled": bool(row[13]),
             "created_ms": int(row[14] or 0),
+            "last_tx_ms": int(row[15] or 0),
+            "tx_error": str(row[16] or ""),
         }
 
     @staticmethod

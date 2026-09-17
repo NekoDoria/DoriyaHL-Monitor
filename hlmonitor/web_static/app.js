@@ -1239,6 +1239,16 @@ function renderWhaleErrors(info, body) {
       at: row.checked_ms,
     });
   }
+  for (const row of info.watches) {
+    if (!row.tx_error) continue;
+    failures.push({
+      kind: "成交监控",
+      name: row.label || row.symbol || row.address,
+      target: `${row.chain} · ${row.address}`,
+      error: row.tx_error,
+      at: row.checked_ms,
+    });
+  }
   for (const row of info.tokens) {
     if (!row.error) continue;
     failures.push({
@@ -1614,6 +1624,58 @@ function renderWhaleWatchGroups(info, body) {
   body.append(wrap);
 }
 
+const TX_DIRECTION_LABELS = { in: "转入", out: "转出", self: "自转" };
+
+function renderWhaleTransactions(info, body) {
+  const rows = info.transactions || [];
+  body.append(sectionTitle(`最近链上成交（${rows.length}）`));
+  if (!rows.length) {
+    body.append(make(
+      "div",
+      "process-empty",
+      info.monitor_transactions
+        ? "还没有抓到成交。首次检查只建立基线，之后出现新成交才会记录。"
+        : "成交监控当前已关闭，可在「设置」里打开。",
+    ));
+  } else {
+    body.append(table(
+      ["时间", "代币", "方向", "数量", "对手方", "链", "交易"],
+      rows.map((row) => {
+        const link = make("a", "tx-link", shortAddress(row.hash || ""));
+        link.href = row.url || "#";
+        link.target = "_blank";
+        link.rel = "noreferrer";
+        const action = make("td");
+        action.append(link);
+        return [
+          cell(timeText(row.time)),
+          cell(row.asset || row.token || "—"),
+          cell(TX_DIRECTION_LABELS[row.direction] || "交易", row.direction === "in" ? "positive" : row.direction === "out" ? "negative" : ""),
+          cell(qty.format(Number(row.value) || 0)),
+          addressCell(row.counterparty || "—"),
+          cell(row.chain),
+          action,
+        ];
+      }),
+    ));
+  }
+  const unsupported = [...new Set(
+    info.watches
+      .filter((row) => {
+        const chain = (info.chains || []).find((item) => item.id === row.chain);
+        return chain && chain.tx === false;
+      })
+      .map((row) => row.symbol || row.token),
+  )];
+  if (unsupported.length && info.monitor_transactions) {
+    body.append(make(
+      "div",
+      "settings-hint",
+      `以下所在链暂时拿不到免费成交接口，只做余额监控：${unsupported.join("、")}`,
+    ));
+  }
+}
+
 function renderWhaleWatches(info, body) {
   body.append(sectionTitle(`监控地址（${info.watches.length}）`));
   if (info.watches.length) {
@@ -1854,6 +1916,23 @@ function renderSettings(data) {
   network.append(make("div", "settings-hint", `当前生效：${data.runtime?.effective_proxy || "直连"}`));
   body.append(network);
 
+  const monitor = make("div", "settings-card");
+  monitor.append(make("div", "settings-title", "链上监控"));
+  const txToggle = make("label", "settings-toggle");
+  const txBox = make("input");
+  txBox.type = "checkbox";
+  txBox.checked = values.whale_monitor_transactions === "1";
+  txToggle.append(txBox, make("span", "", "监控被跟踪地址的链上成交"));
+  inputs.whale_monitor_transactions = txBox;
+  monitor.append(txToggle);
+  monitor.append(make(
+    "div",
+    "settings-hint",
+    "开启后会在检查余额的同时拉取转入/转出明细，能看到对手方、数量和交易链接。"
+    + "HyperEVM 目前没有免费的成交接口，只做余额监控。",
+  ));
+  body.append(monitor);
+
   state.settingsInputs = inputs;
 }
 
@@ -1902,6 +1981,7 @@ function renderWhale(data) {
   if (state.whaleScan) renderWhaleScan(state.whaleScan, body);
   renderWhaleErrors(info, body);
   renderWhaleWatches(info, body);
+  renderWhaleTransactions(info, body);
   renderWhaleTokens(info, body);
 }
 

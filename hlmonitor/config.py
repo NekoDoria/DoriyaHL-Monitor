@@ -99,6 +99,8 @@ class WhaleConfig:
     min_delta_pct: float = 2.0            # 余额变化告警阈值（百分比）
     min_delta_abs: float = 0.0            # 余额变化告警阈值（绝对数量）
     concentration_threshold: float = 3.0  # 集中度变化多少个百分点才告警
+    monitor_transactions: bool = True     # 是否监控被监控地址的链上成交
+    tx_limit: int = 20                    # 每次拉取多少笔成交
     solana_rpc: str = ""                  # Solana RPC；留空则不支持 Solana
     blockchair_url: str = "https://api.blockchair.com"
     blockchair_key: str = ""              # 可选，提高 Blockchair 额度
@@ -309,6 +311,10 @@ def load_config(path: str | os.PathLike | None = None) -> Config:
             0.1,
             _as_float(whales_data.get("concentration_threshold", 3.0), 3.0),
         ),
+        monitor_transactions=_as_bool(
+            whales_data.get("monitor_transactions", True), True
+        ),
+        tx_limit=max(1, min(50, _as_int(whales_data.get("tx_limit", 20), 20))),
         solana_rpc=str(whales_data.get("solana_rpc", "") or "").strip(),
         blockchair_url=(
             str(whales_data.get("blockchair_url", "") or "").strip()

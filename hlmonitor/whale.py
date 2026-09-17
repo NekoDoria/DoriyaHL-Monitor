@@ -20,8 +20,10 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass, field
+from datetime import datetime
 from decimal import Decimal, InvalidOperation
 
+from .format import fmt_time
 from .net import build_opener
 
 __all__ = [
@@ -185,6 +187,18 @@ def _as_float(value, default=0.0):
         return float(value)
     except (TypeError, ValueError):
         return default
+
+
+def _parse_iso_ms(value):
+    """把 ISO 时间串转成毫秒时间戳；解析不了返回 0。"""
+    text = str(value or "").strip()
+    if not text:
+        return 0
+    try:
+        cleaned = text.replace("Z", "+00:00").replace(" ", "T", 1)
+        return int(datetime.fromisoformat(cleaned).timestamp() * 1000)
+    except (ValueError, TypeError, OSError):
+        return 0
 
 
 def is_native_token(chain, token):
@@ -489,6 +503,13 @@ class ChainAdapter:
         """是否支持按符号模糊检索合约地址。"""
         return False
 
+    def supports_transactions(self):
+        """是否支持拉取该地址的链上成交明细。"""
+        return False
+
+    def fetch_transactions(self, token, address, limit=20):
+        raise DataSourceError(f"{self.name} 暂不支持成交监控")
+
     def search_tokens(self, query, limit=10):
         return []
 
@@ -541,6 +562,87 @@ class BlockscoutAdapter(ChainAdapter):
         )
         items = (data or {}).get("items") or []
         return rank_token_candidates(text, items, self.chain, limit=limit)
+
+    def supports_transactions(self):
+        return True
+
+    def fetch_transactions(self, token, address, limit=20):
+        limit = max(1, min(50, int(limit)))
+        if is_native_token(self.chain, token):
+            return self._native_transactions(address, limit)
+        return self._token_transfers(token, address, limit)
+
+    def _tx_row(self, address, sender, receiver, value, asset, item):
+        me = str(address).lower()
+        outgoing = str(sender).lower() == me
+        incoming = str(receiver).lower() == me
+        if outgoing and incoming:
+            direction = "self"
+        elif outgoing:
+            direction = "out"
+        else:
+            direction = "in"
+        tx_hash = str(item.get("transaction_hash") or item.get("hash") or "")
+        return {
+            "hash": tx_hash,
+            "time_ms": _parse_iso_ms(item.get("timestamp")),
+            "direction": direction,
+            "counterparty": receiver if outgoing else sender,
+            "value": value,
+            "asset": asset,
+            "url": f"{self.base_url}/tx/{tx_hash}" if tx_hash else "",
+        }
+
+    def _token_transfers(self, token, address, limit):
+        data = self.client.get_json(
+            f"{self.base_url}/api/v2/addresses/{address}/token-transfers",
+            params={"items_count": limit},
+        )
+        wanted = str(token).lower()
+        rows = []
+        for item in (data or {}).get("items") or []:
+            info = item.get("token") or {}
+            if str(info.get("address_hash") or "").lower() != wanted:
+                continue
+            total = item.get("total") or {}
+            decimals = int(
+                _as_float(total.get("decimals"), _as_float(info.get("decimals"), 18)) or 18
+            )
+            rows.append(
+                self._tx_row(
+                    address,
+                    str((item.get("from") or {}).get("hash") or ""),
+                    str((item.get("to") or {}).get("hash") or ""),
+                    raw_to_units(total.get("value") or 0, decimals),
+                    str(info.get("symbol") or token),
+                    item,
+                )
+            )
+        return rows
+
+    def _native_transactions(self, address, limit):
+        data = self.client.get_json(
+            f"{self.base_url}/api/v2/addresses/{address}/transactions",
+            params={"items_count": limit},
+        )
+        symbols = NATIVE_SYMBOLS.get(self.chain) or (self.name,)
+        rows = []
+        for item in (data or {}).get("items") or []:
+            value = raw_to_units(item.get("value") or 0, 18)
+            # 原生币的 0 值交易基本都是合约调用，不算成交。
+            if value <= 0:
+                continue
+            rows.append(
+                self._tx_row(
+                    address,
+                    str((item.get("from") or {}).get("hash") or ""),
+                    str((item.get("to") or {}).get("hash") or ""),
+                    value,
+                    symbols[0],
+                    item,
+                )
+            )
+        return rows
 
     def token_url(self, token):
         return f"{self.base_url}/token/{token}"
@@ -915,6 +1017,57 @@ class BlockchairAdapter(ChainAdapter):
         node = (data.get("data") or {}).get(address) or {}
         info = node.get("address") or {}
         return raw_to_units(info.get("balance") or 0, self.decimals)
+
+    def supports_transactions(self):
+        return True
+
+    def _utxo_tx_row(self, address, tx_hash, info):
+        me = str(address)
+        received = 0.0
+        sent = 0.0
+        peer = ""
+        for out in info.get("outputs") or []:
+            who = str(out.get("recipient") or "")
+            if who == me:
+                received += raw_to_units(out.get("value") or 0, self.decimals)
+            elif who and not peer:
+                peer = who
+        for inp in info.get("inputs") or []:
+            who = str(inp.get("recipient") or "")
+            if who == me:
+                sent += raw_to_units(inp.get("value") or 0, self.decimals)
+            elif who and not peer:
+                peer = who
+        if received and sent:
+            direction = "self"
+        elif sent:
+            direction = "out"
+        else:
+            direction = "in"
+        tx = info.get("transaction") or {}
+        return {
+            "hash": tx_hash,
+            "time_ms": _parse_iso_ms(tx.get("time") or tx.get("date")),
+            "direction": direction,
+            "counterparty": peer,
+            "value": abs(received - sent) if (received or sent) else 0.0,
+            "asset": self.symbol,
+            "url": f"https://blockchair.com/{self.chain}/transaction/{tx_hash}",
+        }
+
+    def fetch_transactions(self, token, address, limit=20):
+        limit = max(1, min(50, int(limit)))
+        data = self._get(f"dashboards/address/{address}", {"limit": limit})
+        node = (data.get("data") or {}).get(address) or {}
+        hashes = [h for h in (node.get("transactions") or []) if isinstance(h, str)][:limit]
+        if not hashes:
+            return []
+        detail = self._get("dashboards/transactions/" + ",".join(hashes))
+        payload = (detail.get("data") or {})
+        return [
+            self._utxo_tx_row(address, tx_hash, payload.get(tx_hash) or {})
+            for tx_hash in hashes
+        ]
 
 
 class EvmRpcAdapter(ChainAdapter):
@@ -1484,6 +1637,8 @@ class WhaleWatcher:
         exclude_addresses=None,
         exclude_keywords=None,
         concentration_threshold=3.0,
+        monitor_transactions=True,
+        tx_limit=20,
         log=None,
     ):
         self.adapters = adapters
@@ -1493,6 +1648,8 @@ class WhaleWatcher:
         self.exclude_addresses = exclude_addresses
         self.exclude_keywords = exclude_keywords
         self.concentration_threshold = max(0.1, float(concentration_threshold))
+        self.monitor_transactions = bool(monitor_transactions)
+        self.tx_limit = max(1, min(50, int(tx_limit)))
         self._log = log or (lambda message: None)
         self._stop = threading.Event()
         self._thread = None
@@ -1550,13 +1707,10 @@ class WhaleWatcher:
                 if key not in wanted:
                     continue
             try:
-                alert = self._check_watch(entry, now_ms)
+                alerts.extend(self._check_watch(entry, now_ms) or [])
             except Exception as exc:
                 self._log(f"[whale] 检查 {entry.get('address')} 失败: {exc}")
                 self._record_watch_error(entry, now_ms, exc)
-                alert = None
-            if alert is not None:
-                alerts.append(alert)
         return alerts
 
     def _record_watch_error(self, entry, now_ms, exc):
@@ -1586,6 +1740,7 @@ class WhaleWatcher:
             self._log(f"[whale] 记录复扫失败原因时出错: {store_exc}")
 
     def _check_watch(self, entry, now_ms):
+        """返回该条目的告警列表：余额变动 + 新的链上成交。"""
         chain = str(entry.get("chain") or "")
         token = str(entry.get("token") or "")
         address = str(entry.get("address") or "")
@@ -1595,48 +1750,135 @@ class WhaleWatcher:
             self.store.mark_whale_watch(
                 chat_id, chain, token, address, now_ms, error=f"未知链 {chain}"
             )
-            return None
+            return []
 
+        alerts = []
+        balance = None
         try:
             balance = adapter.fetch_balance(token, address, entry.get("decimals"))
         except Exception as exc:
             self.store.mark_whale_watch(
                 chat_id, chain, token, address, now_ms, error=_error_text(exc)
             )
-            return None
 
-        previous = entry.get("last_balance")
-        self.store.mark_whale_watch(
-            chat_id, chain, token, address, now_ms, balance=balance
-        )
-        if previous is None:
-            return None
+        if balance is not None:
+            previous = entry.get("last_balance")
+            self.store.mark_whale_watch(
+                chat_id, chain, token, address, now_ms, balance=balance
+            )
+            if previous is not None:
+                previous = float(previous)
+                delta = balance - previous
+                base = abs(previous)
+                pct = (delta / base * 100.0) if base > 0 else 100.0
+                big_enough = abs(delta) >= _as_float(
+                    entry.get("min_delta_abs"), 0.0
+                )
+                min_pct = _as_float(entry.get("min_delta_pct"), 0.0)
+                pct_ok = min_pct <= 0 or abs(pct) >= min_pct
+                if abs(delta) > 0 and big_enough and pct_ok:
+                    alerts.append(
+                        WhaleAlert(
+                            chat_id=chat_id,
+                            kind="whale_move",
+                            text=self._format_move(
+                                entry, previous, balance, delta, pct
+                            ),
+                            data={
+                                "chain": chain,
+                                "token": token,
+                                "address": address,
+                                "balance": balance,
+                                "previous": previous,
+                                "delta": delta,
+                                "pct": pct,
+                            },
+                        )
+                    )
 
-        previous = float(previous)
-        delta = balance - previous
-        if abs(delta) <= 0:
-            return None
-        base = abs(previous)
-        pct = (delta / base * 100.0) if base > 0 else 100.0
-        if abs(delta) < _as_float(entry.get("min_delta_abs"), 0.0):
-            return None
-        min_pct = _as_float(entry.get("min_delta_pct"), 0.0)
-        if min_pct > 0 and abs(pct) < min_pct:
-            return None
+        # 成交检查独立于余额：有些数据源余额走 RPC、成交走 REST，
+        # 一边限流不应该把另一边也拖没。
+        if self.monitor_transactions and adapter.supports_transactions():
+            try:
+                alerts.extend(self._check_watch_transactions(entry, adapter, now_ms))
+            except Exception as exc:
+                self._log(f"[whale] 拉取成交失败 {address}: {exc}")
+                try:
+                    self.store.mark_whale_watch_tx(
+                        chat_id, chain, token, address, error=_error_text(exc)
+                    )
+                except Exception:
+                    pass
+        return alerts
 
+    def _check_watch_transactions(self, entry, adapter, now_ms):
+        """对比成交游标，返回新增成交的告警。"""
+        chain = str(entry.get("chain") or "")
+        token = str(entry.get("token") or "")
+        address = str(entry.get("address") or "")
+        chat_id = str(entry.get("chat_id") or "")
+        rows = adapter.fetch_transactions(token, address, limit=self.tx_limit)
+        if not rows:
+            # 拉取成功但没有成交，顺手清掉上一次的错误。
+            self.store.mark_whale_watch_tx(
+                chat_id, chain, token, address, error=""
+            )
+            return []
+
+        self.store.save_whale_txs(chat_id, chain, token, address, rows, now_ms)
+        newest = max(int(row.get("time_ms") or 0) for row in rows)
+        previous = int(entry.get("last_tx_ms") or 0)
+        if newest > 0:
+            self.store.mark_whale_watch_tx(
+                chat_id, chain, token, address, now_ms, newest, error=""
+            )
+        # 第一次拿到成交只建立基线，否则会把历史记录全推一遍。
+        if previous <= 0:
+            return []
+
+        fresh = [
+            row
+            for row in rows
+            if int(row.get("time_ms") or 0) > previous
+        ]
+        if not fresh:
+            return []
+        fresh.sort(key=lambda row: int(row.get("time_ms") or 0))
+        return [self._format_tx_alert(entry, fresh)]
+
+    @staticmethod
+    def _format_tx_alert(entry, rows):
+        chain = str(entry.get("chain") or "")
+        address = str(entry.get("address") or "")
+        symbol = str(entry.get("symbol") or entry.get("token") or "")
+        label = str(entry.get("label") or "")
+        title = symbol if not label else f"{symbol} · {label}"
+        words = {"in": ("📥", "转入"), "out": ("📤", "转出"), "self": ("🔁", "自转")}
+        lines = [
+            f"🐋 <b>链上成交 · {html.escape(title)}</b>",
+            (
+                f"链 <code>{html.escape(chain)}</code> · "
+                f"地址 <code>{html.escape(_short_addr(address))}</code>"
+            ),
+            f"新增 <b>{len(rows)}</b> 笔：",
+        ]
+        for row in rows[:6]:
+            arrow, word = words.get(str(row.get("direction")), ("🔁", "交易"))
+            peer = html.escape(_short_addr(str(row.get("counterparty") or "")) or "—")
+            asset = html.escape(str(row.get("asset") or symbol))
+            amount = _fmt_amount(row.get("value"))
+            stamp = fmt_time(row.get("time_ms")) if row.get("time_ms") else "-"
+            lines.append(f"{arrow} {word} <b>{amount} {asset}</b> · {peer} · {stamp}")
+            if row.get("url"):
+                tx_short = html.escape(_short_addr(str(row.get("hash") or "")))
+                lines.append(f'    <a href="{html.escape(str(row["url"]))}">{tx_short}</a>')
+        if len(rows) > 6:
+            lines.append(f"…另有 {len(rows) - 6} 笔")
         return WhaleAlert(
-            chat_id=chat_id,
-            kind="whale_move",
-            text=self._format_move(entry, previous, balance, delta, pct),
-            data={
-                "chain": chain,
-                "token": token,
-                "address": address,
-                "balance": balance,
-                "previous": previous,
-                "delta": delta,
-                "pct": pct,
-            },
+            chat_id=str(entry.get("chat_id") or ""),
+            kind="whale_tx",
+            text="\n".join(lines),
+            data={"chain": chain, "address": address, "count": len(rows)},
         )
 
     @staticmethod

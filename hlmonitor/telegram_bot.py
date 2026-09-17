@@ -4202,6 +4202,8 @@ class TelegramBot:
                 exclude_addresses=whales.exclude_addresses,
                 exclude_keywords=self._whale_exclude_keywords(),
                 concentration_threshold=whales.concentration_threshold,
+                monitor_transactions=whales.monitor_transactions,
+                tx_limit=whales.tx_limit,
                 log=lambda message: print(message),
             )
         return self._whale_watcher

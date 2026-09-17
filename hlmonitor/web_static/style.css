@@ -547,3 +547,6 @@ button:focus-visible, input:focus-visible { outline: 2px solid var(--accent); ou
   color: var(--muted); background: rgba(255,255,255,.05); font-size: 11px; line-height: 1.5;
 }
 .zone-rect.active { z-index: 3; }
+/* 链上筹码：成交列表 */
+.tx-link { color: var(--accent); text-decoration: none; }
+.tx-link:hover { text-decoration: underline; }

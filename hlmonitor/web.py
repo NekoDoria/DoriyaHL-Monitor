@@ -719,6 +719,9 @@ class WebApp:
             "bg_color": "#181818",
             "panel_color": "#202020",
             "proxy_enabled": "1" if self._config_proxy_url else "0",
+            "whale_monitor_transactions": (
+                "1" if self.config.whales.monitor_transactions else "0"
+            ),
             "proxy_url": self._config_proxy_url or "",
         }
 
@@ -790,7 +793,7 @@ class WebApp:
                         "amount_format 只能是 " + "、".join(AMOUNT_STYLES)
                     )
                 clean[key] = text
-            elif key == "proxy_enabled":
+            elif key in {"proxy_enabled", "whale_monitor_transactions"}:
                 enabled = str(raw).strip().lower() in {"1", "true", "yes", "on"}
                 clean[key] = "1" if enabled else "0"
             elif key == "proxy_url":
@@ -846,6 +849,7 @@ class WebApp:
                 "name": adapter.name,
                 "scan": bool(adapter.supports_scan()),
                 "kind": adapter.kind,
+                "tx": bool(adapter.supports_transactions()),
             }
             for chain, adapter in sorted(self.holder_adapters().items())
         ]
@@ -870,9 +874,13 @@ class WebApp:
                     "checked_ms": row["last_checked_ms"],
                     "interval_minutes": round(row["interval_s"] / 60.0, 1),
                     "min_delta_pct": row["min_delta_pct"],
+                    "last_tx_ms": row["last_tx_ms"],
+                    "tx_error": row["tx_error"],
                 }
                 for row in watches
             ],
+            "transactions": self.store.recent_whale_txs(self.web_chat_id, 40),
+            "monitor_transactions": self.whale_tx_enabled(),
             "tokens": [
                 {
                     "chain": row["chain"],
@@ -1053,6 +1061,9 @@ class WebApp:
         )
         return {"added": True}
 
+    def whale_tx_enabled(self):
+        return self.settings_values().get("whale_monitor_transactions") == "1"
+
     def _holder_watcher(self):
         return WhaleWatcher(
             self.holder_adapters(),
@@ -1062,6 +1073,8 @@ class WebApp:
             exclude_addresses=self.config.whales.exclude_addresses,
             exclude_keywords=self._holder_exclude_keywords(),
             concentration_threshold=self.config.whales.concentration_threshold,
+            monitor_transactions=self.whale_tx_enabled(),
+            tx_limit=self.config.whales.tx_limit,
         )
 
     def whale_check(self, targets=None):
