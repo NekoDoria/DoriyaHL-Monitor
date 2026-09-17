@@ -258,7 +258,7 @@ button:focus-visible, input:focus-visible { outline: 2px solid var(--accent); ou
 .zone-layer { position: absolute; inset: 0; z-index: 2; pointer-events: none; }
 .order-zone {
   position: absolute; left: 0; min-width: 3px; border-radius: 3px;
-  pointer-events: auto; cursor: pointer; transition: background-color .16s, box-shadow .16s, border-color .16s;
+  pointer-events: none; transition: background-color .16s, box-shadow .16s, border-color .16s;
 }
 .order-zone.long {
   background: rgba(56,209,167,.14); border: 1px solid rgba(56,209,167,.58);
@@ -266,11 +266,11 @@ button:focus-visible, input:focus-visible { outline: 2px solid var(--accent); ou
 .order-zone.short {
   background: rgba(255,122,122,.13); border: 1px solid rgba(255,122,122,.58);
 }
-.order-zone:hover {
+.order-zone.active {
   box-shadow: 0 0 0 1px currentColor; filter: brightness(1.18); z-index: 1;
 }
-.order-zone.long:hover { background: rgba(56,209,167,.20); }
-.order-zone.short:hover { background: rgba(255,122,122,.19); }
+.order-zone.long.active { background: rgba(56,209,167,.20); }
+.order-zone.short.active { background: rgba(255,122,122,.19); }
 .order-zone[hidden] { display: none !important; }
 
 .price-auto-button {
@@ -289,7 +289,9 @@ button:focus-visible, input:focus-visible { outline: 2px solid var(--accent); ou
 
 .zone-rect {
   position: absolute; left: 0; min-width: 3px; border-radius: 3px;
-  pointer-events: auto; cursor: pointer; overflow: visible;
+  /* 区间条不接收鼠标事件：命中判定统一在图表画布上按价格坐标做，
+     这样谁盖住谁都不影响点击，也不会挡住图表的缩放和十字线。 */
+  pointer-events: none; overflow: visible;
   transition: background-color .16s, box-shadow .16s, border-color .16s;
 }
 .zone-rect[hidden] { display: none !important; }
@@ -302,7 +304,7 @@ button:focus-visible, input:focus-visible { outline: 2px solid var(--accent); ou
 .zone-label[hidden] { display: none !important; }
 .fill-zone.long { background: rgba(56,209,167,.10); border: 1px solid rgba(56,209,167,.42); }
 .fill-zone.short { background: rgba(255,122,122,.10); border: 1px solid rgba(255,122,122,.42); }
-.fill-zone:hover { filter: brightness(1.16); box-shadow: 0 0 0 1px currentColor; z-index: 1; }
+.fill-zone.active { filter: brightness(1.16); box-shadow: 0 0 0 1px currentColor; z-index: 1; }
 .zone-label.above {
   inset: auto 0 100% 0; height: 14px; color: rgba(235,235,235,.72);
 }
@@ -314,7 +316,7 @@ button:focus-visible, input:focus-visible { outline: 2px solid var(--accent); ou
 }
 .fill-zone.long .zone-label { color: rgba(170,255,236,.66); }
 .fill-zone.short .zone-label { color: rgba(255,206,200,.66); }
-.fill-zone:hover { background-color: rgba(120,215,195,.18); }
+.fill-zone.active { background-color: rgba(120,215,195,.18); }
 .process-card {
   padding: 15px; border: 1px solid var(--border); border-radius: 11px;
   background: var(--panel); margin-bottom: 12px;
@@ -338,7 +340,7 @@ button:focus-visible, input:focus-visible { outline: 2px solid var(--accent); ou
 .whale-zone.short { background: rgba(190,140,255,.13); border: 1px dashed rgba(190,140,255,.62); }
 .whale-zone.long .zone-label { color: rgba(190,220,255,.72); }
 .whale-zone.short .zone-label { color: rgba(224,200,255,.72); }
-.whale-zone:hover { background-color: rgba(140,185,255,.2); }
+.whale-zone.active { background-color: rgba(140,185,255,.2); }
 
 .merge-control { display: grid; gap: 6px; padding: 10px; border: 1px solid var(--border); border-radius: 9px; background: #242424; }
 .merge-head { display: flex; align-items: center; justify-content: space-between; font-size: 11px; color: var(--muted); }
@@ -544,4 +546,4 @@ button:focus-visible, input:focus-visible { outline: 2px solid var(--accent); ou
   margin-top: 8px; padding: 6px 8px; border-radius: 7px;
   color: var(--muted); background: rgba(255,255,255,.05); font-size: 11px; line-height: 1.5;
 }
-.zone-rect:hover { z-index: 3; }
+.zone-rect.active { z-index: 3; }

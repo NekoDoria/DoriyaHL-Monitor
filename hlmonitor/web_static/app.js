@@ -23,6 +23,7 @@ const state = {
   priceLines: [],
   zoneRects: [],
   zonePopupRow: null,
+  activeZone: null,
   overlayFrame: null,
 };
 
@@ -481,6 +482,7 @@ function hideZonePopup() {
 function clearOrderZoneOverlays() {
   els.zoneLayer.replaceChildren();
   state.zoneRects = [];
+  state.activeZone = null;
 }
 
 function startOverlayLoop() {
@@ -734,9 +736,19 @@ function renderZonePopup(row, event) {
 }
 
 function zonePointerY(event) {
-  if (Number.isFinite(event.offsetY)) return event.offsetY;
-  const rect = els.chartContainer.getBoundingClientRect();
+  const rect = els.priceChart.getBoundingClientRect();
   return event.clientY - rect.top;
+}
+
+function setActiveZone(item) {
+  if (state.activeZone === item) return;
+  if (state.activeZone && state.activeZone.node) {
+    state.activeZone.node.classList.remove("active");
+  }
+  state.activeZone = item || null;
+  if (state.activeZone && state.activeZone.node) {
+    state.activeZone.node.classList.add("active");
+  }
 }
 
 // 同一纵向位置上可能叠着好几个区间（都是全宽横条），
@@ -753,31 +765,37 @@ function zoneOverlapsAt(y) {
   return hits;
 }
 
+function handleZoneHover(event) {
+  const hits = zoneOverlapsAt(zonePointerY(event));
+  const pick = hits[0] || null;
+  setActiveZone(pick);
+  if (pick) showZoneTooltip(event, pick.row);
+  else hideZoneTooltip();
+}
+
+function handleZoneClick(event) {
+  const hits = zoneOverlapsAt(zonePointerY(event));
+  // 没点中任何区间就放行，让 document 上的监听把弹窗关掉。
+  if (!hits.length) return;
+  event.stopPropagation();
+  let pick = hits[0];
+  // 按住 Alt 逐个切换这里重叠的区间；起点取当前正在看的那个，
+  // 这样连按可以一直循环下去。
+  if (event.altKey && hits.length > 1) {
+    const from = hits.some((item) => item.row === state.zonePopupRow)
+      ? state.zonePopupRow
+      : pick.row;
+    const current = hits.findIndex((item) => item.row === from);
+    pick = hits[(current + 1 + hits.length) % hits.length] || pick;
+  }
+  state.zonePopupRow = pick.row;
+  setActiveZone(pick);
+  renderZonePopup(pick.row, event);
+}
+
 function addZoneRect(row, className) {
   const node = make("div", className);
   node.dataset.zoneIndex = String(state.zoneRects.length);
-  node.addEventListener("mouseenter", (event) => showZoneTooltip(event, row));
-  node.addEventListener("mousemove", (event) => showZoneTooltip(event, row));
-  node.addEventListener("mouseleave", hideZoneTooltip);
-  node.addEventListener("click", (event) => {
-    event.stopPropagation();
-    let target = row;
-    // 被更大的区间压住时，按住 Alt 点击逐个切换这里重叠的区间。
-    // 起点取“当前正在看的那个”，这样连按可以一直循环下去。
-    if (event.altKey) {
-      const hits = zoneOverlapsAt(zonePointerY(event));
-      if (hits.length > 1) {
-        const from = hits.some((item) => item.row === state.zonePopupRow)
-          ? state.zonePopupRow
-          : row;
-        const current = hits.findIndex((item) => item.row === from);
-        const next = hits[(current + 1 + hits.length) % hits.length];
-        if (next) target = next.row;
-      }
-    }
-    state.zonePopupRow = target;
-    renderZonePopup(target, event);
-  });
   els.zoneLayer.append(node);
   const label = make("span", "zone-label", zoneDirectionLabel(row));
   node.append(label);
@@ -2133,6 +2151,13 @@ function showPositionTooltip(event) {
   tooltip.style.top = `${top}px`;
   tooltip.style.right = "";
 }
+
+els.priceChart.addEventListener("mousemove", handleZoneHover);
+els.priceChart.addEventListener("mouseleave", () => {
+  setActiveZone(null);
+  hideZoneTooltip();
+});
+els.priceChart.addEventListener("click", handleZoneClick);
 
 els.positionHitbox.addEventListener("mouseenter", showPositionTooltip);
 els.positionHitbox.addEventListener("mousemove", showPositionTooltip);
