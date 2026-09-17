@@ -185,6 +185,13 @@ class EventStore:
         os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
         self._lock = threading.RLock()
         self.conn = sqlite3.connect(path, check_same_thread=False)
+        # Telegram bot 和 Web 面板会同时打开这个库，用 WAL 让读写并发，
+        # 配合 busy_timeout 避免两边互相锁死。
+        try:
+            self.conn.execute("PRAGMA journal_mode = WAL")
+            self.conn.execute("PRAGMA synchronous = NORMAL")
+        except sqlite3.DatabaseError:
+            pass
         self.conn.execute("PRAGMA busy_timeout = 5000")
         with self._lock:
             self.conn.executescript(SCHEMA)

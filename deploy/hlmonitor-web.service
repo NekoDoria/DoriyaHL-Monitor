@@ -1,0 +1,20 @@
+[Unit]
+Description=Hyperliquid monitor web dashboard
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=hlmonitor
+WorkingDirectory=/opt/hlmonitor
+ExecStart=/opt/hlmonitor/.venv/bin/python -m hlmonitor.web --host 127.0.0.1 --port 8787
+Restart=always
+RestartSec=5
+Environment=PYTHONUNBUFFERED=1
+
+# Web 面板本身没有鉴权，默认只监听 127.0.0.1。
+# 需要远程访问时，请在前面放一层带认证的反向代理（nginx / caddy），
+# 不要直接把 --host 改成 0.0.0.0 暴露到公网。
+
+[Install]
+WantedBy=multi-user.target

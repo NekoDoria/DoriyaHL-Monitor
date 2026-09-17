@@ -222,19 +222,58 @@ sudo -u hlmonitor .venv/bin/python -m hlmonitor --once --address 0x要监控的�
 sudo -u hlmonitor .venv/bin/python -m hlmonitor.tgbot   # Ctrl+C 退出
 ```
 
-5. 用 systemd 托管（仓库里已带好 [deploy/hlmonitor.service](deploy/hlmonitor.service)）：
+5. 用 systemd 托管。仓库里带两个单元，**它们是独立的服务**：
+
+| 单元 | 作用 | 默认监听 |
+| --- | --- | --- |
+| `hlmonitor.service` | Telegram Bot | 无（长轮询出站） |
+| `hlmonitor-web.service` | Web 面板 | `127.0.0.1:8787` |
 
 ```bash
-sudo cp deploy/hlmonitor.service /etc/systemd/system/
+cd /opt/hlmonitor
+sudo cp deploy/hlmonitor.service deploy/hlmonitor-web.service /etc/systemd/system/
 sudo systemctl daemon-reload
-sudo systemctl enable --now hlmonitor
-sudo systemctl status hlmonitor
-journalctl -u hlmonitor -f
+sudo systemctl enable --now hlmonitor hlmonitor-web
+sudo systemctl status hlmonitor hlmonitor-web
+journalctl -u hlmonitor -f          # Bot 日志
+journalctl -u hlmonitor-web -f      # Web 日志
 ```
 
-服务按 `hlmonitor` 用户运行，工作目录是 `/opt/hlmonitor`，数据（SQLite）会存在 `/opt/hlmonitor/data/`，记得备份这个目录。
+拆成两个单元是有意的：静态文件改动只需刷新浏览器，但 Python 代码改动要重启进程才能生效，两边可以各自重启，互不影响。
 
-Bot 使用长轮询主动连接 Telegram API，服务器不需要开放任何入站端口，也不需要域名或反向代理，只要出站 HTTPS 正常即可。
+服务按 `hlmonitor` 用户运行，工作目录是 `/opt/hlmonitor`，数据（SQLite）会存在 `/opt/hlmonitor/data/`，记得备份这个目录。两个服务共用同一个库，程序已开启 WAL 模式并设置 `busy_timeout`，可以安全并发读写。
+
+Bot 使用长轮询主动连接 Telegram API，服务器不需要开放任何入站端口，只要出站 HTTPS 正常即可。
+
+### 访问 Web 面板
+
+`hlmonitor-web.service` 默认只监听 `127.0.0.1:8787`，也就是只能在服务器本机访问。**Web 面板本身没有任何鉴权**，所以不要直接把 `--host` 改成 `0.0.0.0` 暴露到公网。
+
+推荐在服务器前面加一层带认证的反向代理，例如 Caddy：
+
+```caddy
+hl.example.com {
+    basic_auth {
+        yourname <bcrypt哈希>
+    }
+    reverse_proxy 127.0.0.1:8787
+}
+```
+
+只想临时从本地看，用 SSH 端口转发更省事：
+
+```bash
+ssh -N -L 8787:127.0.0.1:8787 hlmonitor@你的服务器
+# 然后本地打开 http://127.0.0.1:8787
+```
+
+### 改完代码后怎么生效
+
+- **只改了前端**（`web_static/` 下的 html/css/js）：浏览器刷新即可，不用重启。
+- **改了 Python**：`sudo systemctl restart hlmonitor hlmonitor-web`。
+- **改了 `deploy/*.service`**：`sudo systemctl daemon-reload && sudo systemctl restart hlmonitor hlmonitor-web`。
+
+Telegram 里的 `/update` 只会拉代码并重启 Bot 进程，**不会重启 Web 服务**（重启 systemd 单元需要 root）。所以用 `/update` 更新后，记得手动执行一次 `sudo systemctl restart hlmonitor-web`，否则 Web 会继续跑旧代码。
 
 ### 想打包成单个二进制？
 

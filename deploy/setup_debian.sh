@@ -222,22 +222,33 @@ ok "自检通过"
 # ---------- 8/8 systemd 服务 ----------
 if command -v systemctl >/dev/null 2>&1; then
   say "[8/8] 安装 systemd 服务（开机自启）..."
-  if [ -f "$APP_DIR/deploy/hlmonitor.service" ]; then
+  INSTALLED_UNITS=""
+  for unit in hlmonitor hlmonitor-web; do
+    unit_src="$APP_DIR/deploy/$unit.service"
+    if [ ! -f "$unit_src" ]; then
+      warn "未找到 deploy/$unit.service，跳过"
+      continue
+    fi
     sed "s|/opt/hlmonitor|$APP_DIR|g" \
-      "$APP_DIR/deploy/hlmonitor.service" > /etc/systemd/system/hlmonitor.service
+      "$unit_src" > "/etc/systemd/system/$unit.service"
+    INSTALLED_UNITS="$INSTALLED_UNITS $unit"
+  done
+  if [ -n "$INSTALLED_UNITS" ]; then
     systemctl daemon-reload
-    systemctl enable hlmonitor >/dev/null 2>&1
+    for unit in $INSTALLED_UNITS; do
+      systemctl enable "$unit" >/dev/null 2>&1
+    done
     if [ "$AUTO_START" -eq 1 ]; then
-      systemctl restart hlmonitor
+      for unit in $INSTALLED_UNITS; do
+        systemctl restart "$unit"
+      done
       ok "服务已启动（systemctl status hlmonitor 查看状态）"
     else
-      say "服务已设为开机自启；改好配置后执行：sudo systemctl start hlmonitor"
+      say "服务已设为开机自启；改好配置后执行：sudo systemctl start hlmonitor hlmonitor-web"
     fi
-  else
-    warn "未找到 deploy/hlmonitor.service，跳过 systemd 配置"
   fi
 else
-  warn "当前系统没有 systemctl，跳过 systemd 配置"
+  warn "当前没有 systemctl，跳过 systemd 配置"
 fi
 
 cat <<EOF
@@ -249,7 +260,9 @@ cat <<EOF
   运行用户 : $SERVICE_USER
   配置文件 : $APP_DIR/config.toml
   虚拟环境 : $APP_DIR/.venv
-  系统服务 : hlmonitor.service（已开机自启）
+  系统服务 : hlmonitor.service（Telegram bot）
+             hlmonitor-web.service（Web 面板，默认 http://127.0.0.1:8787）
+             两者均已设为开机自启
 
   接下来：
     1. 编辑配置：
@@ -258,7 +271,8 @@ cat <<EOF
     2. 启动服务：
          sudo systemctl start hlmonitor
     3. 查看日志：
-         journalctl -u hlmonitor -f
+         journalctl -u hlmonitor -f          # Telegram bot
+         journalctl -u hlmonitor-web -f      # Web 面板
     4. 命令行快速验证一次：
          sudo runuser -u $SERVICE_USER -- $VENV_PY -m hlmonitor --once --address 0x你的地址
 

@@ -1,5 +1,6 @@
 [Unit]
 Description=Hyperliquid address monitor Telegram bot
+# Web 面板是独立的 hlmonitor-web.service，两者共用 data/ 下的 SQLite（已启用 WAL）。
 After=network-online.target
 Wants=network-online.target
 
