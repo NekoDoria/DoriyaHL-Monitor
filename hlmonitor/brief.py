@@ -6,7 +6,7 @@ import html
 import math
 
 from .assets import spot_coin_label
-from .format import fmt_qty, fmt_time, fmt_usd_cn, short_addr
+from .format import fmt_qty, fmt_time, fmt_usd_amount, short_addr
 
 
 def _num(value, default=0.0):
@@ -71,7 +71,7 @@ def _fmt_pnl(value):
         return "-"
     num = _num(value)
     sign = "+" if num > 0 else ""
-    return f"{sign}{fmt_usd_cn(num)}"
+    return f"{sign}{fmt_usd_amount(num)}"
 
 
 BRIEF_PAGE_SIZE = 5
@@ -96,11 +96,11 @@ def format_position_brief(
 
     lines = [
         f"📊 {title} · {short_addr(address)}",
-        f"账户净值: {fmt_usd_cn(summary.get('account_value', 0))}",
+        f"账户净值: {fmt_usd_amount(summary.get('account_value', 0))}",
         f"浮动盈亏: {_fmt_pnl(summary.get('unrealized_pnl'))}",
         f"已结盈亏: {_fmt_pnl(summary.get('realized_pnl'))}",
-        f"合约持仓名义: {fmt_usd_cn(summary.get('total_ntl_pos', 0))}",
-        f"可提取: {fmt_usd_cn(summary.get('withdrawable', 0))}",
+        f"合约持仓名义: {fmt_usd_amount(summary.get('total_ntl_pos', 0))}",
+        f"可提取: {fmt_usd_amount(summary.get('withdrawable', 0))}",
         f"排序: {sort_label}",
     ]
 
@@ -125,9 +125,9 @@ def format_position_brief(
             peak = _num(pos.get("peak_notional") or notional)
             peak_ratio = notional / peak if peak else 0
             lines.append(f"  浮动盈亏: {_fmt_pnl(pos.get('unrealized_pnl'))}")
-            lines.append(f"  持仓: {fmt_usd_cn(notional)}")
+            lines.append(f"  持仓: {fmt_usd_amount(notional)}")
             lines.append(
-                f"  峰值进度: {_progress_bar(peak_ratio)} {peak_ratio * 100:.1f}% · 峰值 {fmt_usd_cn(peak)}"
+                f"  峰值进度: {_progress_bar(peak_ratio)} {peak_ratio * 100:.1f}% · 峰值 {fmt_usd_amount(peak)}"
             )
             lines.append(f"  入场价: {entry}")
             lines.append(f"  开仓时间: {open_label}")
@@ -206,11 +206,11 @@ def format_position_brief_html(
     header = "\n".join(
         [
             f"<b>📊 {html.escape(title)} · {html.escape(short_addr(address))}</b>",
-            f"账户净值: {html.escape(fmt_usd_cn(summary.get('account_value', 0)))}",
+            f"账户净值: {html.escape(fmt_usd_amount(summary.get('account_value', 0)))}",
             f"浮动盈亏: {html.escape(_fmt_pnl(summary.get('unrealized_pnl')))}",
             f"已结盈亏: {html.escape(_fmt_pnl(summary.get('realized_pnl')))}",
-            f"合约持仓名义: {html.escape(fmt_usd_cn(summary.get('total_ntl_pos', 0)))}",
-            f"可提取: {html.escape(fmt_usd_cn(summary.get('withdrawable', 0)))}",
+            f"合约持仓名义: {html.escape(fmt_usd_amount(summary.get('total_ntl_pos', 0)))}",
+            f"可提取: {html.escape(fmt_usd_amount(summary.get('withdrawable', 0)))}",
             f"排序: {sort_label}",
         ]
     )
@@ -239,7 +239,7 @@ def format_position_brief_html(
             for label_l, value_l, label_r, value_r in (
                 (
                     "持仓",
-                    fmt_usd_cn(notional),
+                    fmt_usd_amount(notional),
                     "浮动盈亏",
                     _fmt_pnl(pos.get("unrealized_pnl")),
                 ),
@@ -251,7 +251,7 @@ def format_position_brief_html(
                 )
             rows.append(
                 f"<tr><td>峰值</td>"
-                f"<td colspan=\"3\">{html.escape(f'{_progress_bar(peak_ratio)} {peak_ratio * 100:.1f}% · {fmt_usd_cn(peak)}')}</td></tr>"
+                f"<td colspan=\"3\">{html.escape(f'{_progress_bar(peak_ratio)} {peak_ratio * 100:.1f}% · {fmt_usd_amount(peak)}')}</td></tr>"
             )
             blocks.append(
                 f"{title_line}<table bordered compact>{''.join(rows)}</table>"
@@ -425,7 +425,7 @@ def format_tpsl_report_html(
                 marker = ""
                 if _num(order.get("sz")) <= 0 and _num(order.get("origSz")) <= 0:
                     marker = "（当前仓位）"
-                body.append(f"金额: ≈{fmt_usd_cn(notional)}{marker}")
+                body.append(f"金额: ≈{fmt_usd_amount(notional)}{marker}")
             entry_block = (
                 "<blockquote expandable>"
                 + "\n".join(html.escape(line) for line in body)
@@ -697,7 +697,7 @@ def format_open_orders_intervals_html(
                 f"<tr><td>{range_label}</td><td>{html.escape(range_value)}</td>"
                 f"<td>均价</td><td>{fmt_qty(stats['avg_px'])}</td></tr>"
                 f"<tr><td>数量</td><td>{html.escape(fmt_qty(stats['total_sz']))}</td>"
-                f"<td>金额</td><td>≈{html.escape(fmt_usd_cn(stats['total_value']))}</td></tr>"
+                f"<td>金额</td><td>≈{html.escape(fmt_usd_amount(stats['total_value']))}</td></tr>"
             )
             entry_block = f"<table bordered compact>{rows}</table>"
             coin_header = None

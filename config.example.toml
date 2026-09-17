@@ -59,3 +59,35 @@ vol_lookback_hours = 48          # 用最近多少小时的 1 小时 K 线估算
 width_multiplier = 3.0           # 单个区间最大宽度 = 合并阈值 × 该倍数，防止网格被链式合并成一整条
 ladder_min_orders = 5            # 至少多少笔才判定为均匀网格并整段合并
 ladder_max_cv = 0.30             # 相邻间距变异系数低于该值判定为均匀网格
+
+[whales]
+enabled = true                    # 是否启用链上筹码集中度与巨鲸地址监控
+scan_limit = 50                   # 单次扫描抓取的持仓地址数量（5-200）
+watch_interval_minutes = 10       # 监控地址余额轮询间隔（分钟）
+scan_interval_hours = 6           # 已订阅代币自动复扫间隔（小时）
+min_delta_pct = 2.0               # 余额变化达到该百分比才告警
+min_delta_abs = 0.0               # 余额变化绝对值下限，0 表示只看百分比
+concentration_threshold = 3.0     # 单地址占比变化多少个百分点才告警
+max_rows = 12                     # 扫描结果展示的持仓行数（3-50）
+timeout = 25.0                    # 单次外部请求超时（秒）
+retries = 2                       # 外部请求重试次数
+
+# Solana 需要允许 getTokenLargestAccounts 的 RPC（公共节点普遍限流）。
+# 留空则不启用 Solana。
+# solana_rpc = "https://mainnet.helius-rpc.com/?api-key=..."
+
+# Blockchair 免费额度有限，共享出口 IP 容易被临时拉黑。
+# 如果经常遇到限流，可以填 API key 或只保留需要的链。
+# blockchair_key = ""
+# blockchair_chains = ["bitcoin", "zcash", "litecoin"]
+
+# 覆盖默认数据源地址（键为链名）。
+# chain_urls = { ethereum = "https://eth.blockscout.com" }
+
+# 关闭不需要的链，减少请求量。
+# disabled_chains = ["dogecoin", "dash", "celo"]
+
+# 额外排除的地址标签 / 名称关键词 / 具体地址。
+# exclude_tags = ["vault"]
+# exclude_label_keywords = ["myexchange"]
+# exclude_addresses = ["0x0000000000000000000000000000000000000000"]

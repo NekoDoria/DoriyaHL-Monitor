@@ -89,6 +89,31 @@ class HunterConfig:
 
 
 @dataclass
+class WhaleConfig:
+    """链上筹码集中度扫描与巨鲸地址监控。"""
+
+    enabled: bool = True
+    scan_limit: int = 50                 # 单次扫描抓取的持仓地址数量
+    watch_interval_minutes: float = 10.0  # 监控地址余额轮询间隔（分钟）
+    scan_interval_hours: float = 6.0      # 已订阅代币自动复扫间隔（小时）
+    min_delta_pct: float = 2.0            # 余额变化告警阈值（百分比）
+    min_delta_abs: float = 0.0            # 余额变化告警阈值（绝对数量）
+    concentration_threshold: float = 3.0  # 集中度变化多少个百分点才告警
+    solana_rpc: str = ""                  # Solana RPC；留空则不支持 Solana
+    blockchair_url: str = "https://api.blockchair.com"
+    blockchair_key: str = ""              # 可选，提高 Blockchair 额度
+    blockchair_chains: list = field(default_factory=list)
+    chain_urls: dict = field(default_factory=dict)   # chain -> 自定义 API 地址
+    disabled_chains: list = field(default_factory=list)
+    exclude_tags: list = field(default_factory=list)      # 额外排除的地址标签
+    exclude_label_keywords: list = field(default_factory=list)  # 额外排除的地址名关键词
+    exclude_addresses: list = field(default_factory=list)  # 手动排除的地址
+    max_rows: int = 12                    # 扫描结果展示行数
+    timeout: float = 25.0
+    retries: int = 2
+
+
+@dataclass
 class Config:
     addresses: list[str] = field(default_factory=list)
     network: str = "mainnet"
@@ -102,6 +127,7 @@ class Config:
     rules: RuleConfig = field(default_factory=RuleConfig)
     order_merge: OrderConfig = field(default_factory=OrderConfig)
     hunter: HunterConfig = field(default_factory=HunterConfig)
+    whales: WhaleConfig = field(default_factory=WhaleConfig)
 
     @property
     def db_path(self) -> Path:
@@ -137,6 +163,14 @@ def _as_bool(value, default):
     if isinstance(value, bool):
         return value
     return str(value).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _as_list(value):
+    if value is None:
+        return []
+    if isinstance(value, (list, tuple)):
+        return list(value)
+    return [value]
 
 
 def _as_int(value, default):
@@ -243,6 +277,66 @@ def load_config(path: str | os.PathLike | None = None) -> Config:
         top_n=max(1, _as_int(hunter_data.get("top_n", 10), 10)),
     )
 
+    whales_data = data.get("whales", {})
+    blockchair_chains = [
+        str(item).lower() for item in _as_list(whales_data.get("blockchair_chains"))
+    ]
+    chain_urls = {
+        str(key).lower(): str(value).strip()
+        for key, value in (whales_data.get("chain_urls") or {}).items()
+        if str(value).strip()
+    }
+    whales = WhaleConfig(
+        enabled=_as_bool(whales_data.get("enabled", True), True),
+        scan_limit=max(5, min(200, _as_int(whales_data.get("scan_limit", 50), 50))),
+        watch_interval_minutes=max(
+            1.0,
+            _as_float(
+                whales_data.get("watch_interval_minutes", 10.0), 10.0
+            ),
+        ),
+        scan_interval_hours=max(
+            0.25,
+            _as_float(whales_data.get("scan_interval_hours", 6.0), 6.0),
+        ),
+        min_delta_pct=max(
+            0.0, _as_float(whales_data.get("min_delta_pct", 2.0), 2.0)
+        ),
+        min_delta_abs=max(
+            0.0, _as_float(whales_data.get("min_delta_abs", 0.0), 0.0)
+        ),
+        concentration_threshold=max(
+            0.1,
+            _as_float(whales_data.get("concentration_threshold", 3.0), 3.0),
+        ),
+        solana_rpc=str(whales_data.get("solana_rpc", "") or "").strip(),
+        blockchair_url=(
+            str(whales_data.get("blockchair_url", "") or "").strip()
+            or "https://api.blockchair.com"
+        ),
+        blockchair_key=str(whales_data.get("blockchair_key", "") or "").strip(),
+        blockchair_chains=blockchair_chains,
+        chain_urls=chain_urls,
+        disabled_chains=[
+            str(item).lower()
+            for item in _as_list(whales_data.get("disabled_chains"))
+        ],
+        exclude_tags=[
+            str(item).lower()
+            for item in _as_list(whales_data.get("exclude_tags"))
+        ],
+        exclude_label_keywords=[
+            str(item).lower()
+            for item in _as_list(whales_data.get("exclude_label_keywords"))
+        ],
+        exclude_addresses=[
+            str(item) for item in _as_list(whales_data.get("exclude_addresses"))
+        ],
+        max_rows=max(3, min(50, _as_int(whales_data.get("max_rows", 12), 12))),
+        timeout=max(5.0, _as_float(whales_data.get("timeout", 25.0), 25.0)),
+        retries=max(0, min(5, _as_int(whales_data.get("retries", 2), 2))),
+    )
+
     return Config(
         addresses=addresses,
         network=network,
@@ -258,4 +352,5 @@ def load_config(path: str | os.PathLike | None = None) -> Config:
         rules=rules,
         order_merge=order_merge,
         hunter=hunter,
+        whales=whales,
     )

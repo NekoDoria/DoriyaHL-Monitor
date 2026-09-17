@@ -17,8 +17,21 @@ from . import __version__
 from .config import Config, load_config, normalize_address
 from .hunter import _build_coin_dex_map
 from .brief import cluster_open_orders, interval_stats
+from .format import AMOUNT_STYLES, set_amount_style
 from .monitor import AddressMonitor
+from .net import build_opener
 from .state import EventStore
+from .whale import (
+    DEFAULT_EXCLUDE_LABEL_KEYWORDS,
+    DEFAULT_EXCLUDE_TAGS,
+    ConcentrationReport,
+    WhaleWatcher,
+    build_adapters,
+    is_native_token,
+    resolve_token,
+    scan_token,
+    search_tokens,
+)
 
 
 STATIC_DIR = Path(__file__).with_name("web_static")
@@ -77,6 +90,11 @@ class WebApp:
         self.chart_cache_ttl = 15.0
         self.whale_cache = {}
         self.whale_cache_ttl = 60.0
+        self._holder_adapter_cache = None
+        self.holder_scan_cache = {}
+        self.holder_scan_ttl = 60.0
+        self._config_proxy_url = config.proxy_url
+        self.apply_settings()
 
     def close(self):
         self.store.close()
@@ -295,6 +313,10 @@ class WebApp:
         except Exception:
             candles = []
 
+        theme = self.settings_values()
+        up_color = theme.get("up_color") or "#1d8f70"
+        down_color = theme.get("down_color") or "#b54848"
+
         candle_rows = []
         volume_rows = []
         for row in candles:
@@ -314,7 +336,7 @@ class WebApp:
                 {
                     "time": timestamp,
                     "value": volume,
-                    "color": "#1d8f70" if close_px >= open_px else "#b54848",
+                    "color": up_color if close_px >= open_px else down_color,
                 }
             )
 
@@ -676,6 +698,376 @@ class WebApp:
         }
 
 
+    # ---------------------------------------------------------------- 设置
+
+    COLOR_KEYS = (
+        "accent_color",
+        "up_color",
+        "down_color",
+        "bg_color",
+        "panel_color",
+    )
+
+    def default_settings(self):
+        """默认值始终以启动时的 config.toml 为基准。"""
+        return {
+            "site_title": "Hyperliquid Monitor",
+            "amount_format": "compact",
+            "accent_color": "#38d1a7",
+            "up_color": "#1d8f70",
+            "down_color": "#b54848",
+            "bg_color": "#181818",
+            "panel_color": "#202020",
+            "proxy_enabled": "1" if self._config_proxy_url else "0",
+            "proxy_url": self._config_proxy_url or "",
+        }
+
+    def settings_values(self):
+        values = self.default_settings()
+        stored = self.store.get_app_settings()
+        for key in values:
+            if key in stored:
+                values[key] = stored[key]
+        return values
+
+    def public_settings(self):
+        """首屏就要应用的设置：标题与配色。"""
+        values = self.settings_values()
+        return {
+            "site_title": values["site_title"],
+            "amount_format": values["amount_format"],
+            "accent_color": values["accent_color"],
+            "up_color": values["up_color"],
+            "down_color": values["down_color"],
+            "bg_color": values["bg_color"],
+            "panel_color": values["panel_color"],
+        }
+
+    def settings_data(self):
+        return {
+            "type": "settings",
+            "values": self.settings_values(),
+            "defaults": self.default_settings(),
+            "runtime": {
+                "effective_proxy": self.config.proxy_url or "",
+                "network": self.config.network,
+                "info_url": self.config.info_url,
+            },
+            "generated_at": int(time.time() * 1000),
+        }
+
+    def apply_settings(self):
+        """把已保存的设置同步到运行时（代理与金额显示风格）。"""
+        values = self.settings_values()
+        set_amount_style(values.get("amount_format"))
+        enabled = values.get("proxy_enabled") == "1"
+        url = str(values.get("proxy_url") or "").strip()
+        target = url if (enabled and url) else None
+        if target != self.config.proxy_url:
+            self.config.proxy_url = target
+            # REST 客户端与链上适配器都按新代理重建；WebSocket 需重启进程。
+            self.monitor.api.opener = build_opener(target)
+            self._holder_adapter_cache = None
+            self.holder_scan_cache.clear()
+        return values
+
+    def update_settings(self, payload):
+        defaults = self.default_settings()
+        merged = dict(self.settings_values())
+        clean = {}
+        for key, raw in (payload or {}).items():
+            if key not in defaults:
+                continue
+            if key in self.COLOR_KEYS:
+                text = str(raw).strip()
+                if not re.fullmatch(r"#[0-9a-fA-F]{6}", text):
+                    raise ValueError(f"{key} 需要是 #RRGGBB 格式的颜色")
+                clean[key] = text.lower()
+            elif key == "amount_format":
+                text = str(raw).strip().lower()
+                if text not in AMOUNT_STYLES:
+                    raise ValueError(
+                        "amount_format 只能是 " + "、".join(AMOUNT_STYLES)
+                    )
+                clean[key] = text
+            elif key == "proxy_enabled":
+                enabled = str(raw).strip().lower() in {"1", "true", "yes", "on"}
+                clean[key] = "1" if enabled else "0"
+            elif key == "proxy_url":
+                clean[key] = str(raw).strip()[:300]
+            elif key == "site_title":
+                text = str(raw).strip()[:80]
+                clean[key] = text or defaults[key]
+        if not clean:
+            raise ValueError("没有可保存的设置")
+
+        merged.update(clean)
+        if merged.get("proxy_enabled") == "1" and not merged.get("proxy_url"):
+            raise ValueError("启用代理时必须填写代理地址")
+
+        self.store.set_app_settings(clean, int(time.time() * 1000))
+        self.apply_settings()
+        return self.settings_data()
+
+    def reset_settings(self):
+        self.store.set_app_settings(
+            {key: None for key in self.default_settings()},
+            int(time.time() * 1000),
+        )
+        self.apply_settings()
+        return self.settings_data()
+
+    # ---------------------------------------------------------------- 链上筹码
+
+    def holder_adapters(self):
+        if self._holder_adapter_cache is None:
+            self._holder_adapter_cache = build_adapters(
+                self.config.whales, proxy_url=self.config.proxy_url
+            )
+        return self._holder_adapter_cache
+
+    def _holder_exclude_tags(self):
+        extra = {
+            str(item).lower() for item in (self.config.whales.exclude_tags or [])
+        }
+        return set(DEFAULT_EXCLUDE_TAGS) | extra
+
+    def _holder_exclude_keywords(self):
+        extra = tuple(
+            str(item).lower()
+            for item in (self.config.whales.exclude_label_keywords or [])
+        )
+        return tuple(DEFAULT_EXCLUDE_LABEL_KEYWORDS) + extra
+
+    def whale_chains(self):
+        return [
+            {
+                "id": chain,
+                "name": adapter.name,
+                "scan": bool(adapter.supports_scan()),
+                "kind": adapter.kind,
+            }
+            for chain, adapter in sorted(self.holder_adapters().items())
+        ]
+
+    def whale_data(self):
+        whales = self.config.whales
+        watches = self.store.get_whale_watches(chat_id=self.web_chat_id)
+        tokens = self.store.get_whale_tokens(chat_id=self.web_chat_id)
+        return {
+            "type": "whale",
+            "enabled": bool(whales.enabled),
+            "chains": self.whale_chains(),
+            "watches": [
+                {
+                    "chain": row["chain"],
+                    "token": row["token"],
+                    "address": row["address"],
+                    "symbol": row["symbol"],
+                    "label": row["label"],
+                    "balance": row["last_balance"],
+                    "error": row["last_error"],
+                    "checked_ms": row["last_checked_ms"],
+                    "interval_minutes": round(row["interval_s"] / 60.0, 1),
+                    "min_delta_pct": row["min_delta_pct"],
+                }
+                for row in watches
+            ],
+            "tokens": [
+                {
+                    "chain": row["chain"],
+                    "token": row["token"],
+                    "symbol": row["symbol"],
+                    "label": row["label"],
+                    "top_pct": row["last_top_pct"],
+                    "score": row["last_score"],
+                    "scanned_ms": row["last_scan_ms"],
+                    "error": row["last_error"],
+                    "interval_hours": round(row["interval_s"] / 3600.0, 2),
+                }
+                for row in tokens
+            ],
+            "defaults": {
+                "scan_limit": whales.scan_limit,
+                "max_rows": whales.max_rows,
+                "watch_interval_minutes": whales.watch_interval_minutes,
+                "scan_interval_hours": whales.scan_interval_hours,
+                "min_delta_pct": whales.min_delta_pct,
+            },
+            "generated_at": int(time.time() * 1000),
+        }
+
+    def whale_scan(self, chain, token, limit=None, force=False):
+        chain = str(chain or "").strip().lower()
+        query = str(token or "").strip()
+        if not chain or not query:
+            raise ValueError("需要提供链和代币")
+        adapter = self.holder_adapters().get(chain)
+        if adapter is None:
+            raise ValueError(f"不支持的链 {chain}")
+        if not adapter.supports_scan():
+            raise ValueError(
+                f"{adapter.name} 没有免费的持仓榜接口，只能监控已知地址"
+            )
+        try:
+            limit = int(limit)
+        except (TypeError, ValueError):
+            limit = self.config.whales.scan_limit
+        limit = max(5, min(200, limit))
+
+        cache_key = (chain, query.lower(), limit)
+        now = time.monotonic()
+        if not force:
+            cached = self.holder_scan_cache.get(cache_key)
+            if cached and now - cached[0] < self.holder_scan_ttl:
+                return cached[1]
+
+        # 允许直接填符号（例如 ARB），解析成合约地址后再扫。
+        resolution = resolve_token(adapter, query)
+        if not resolution.ok:
+            message = (
+                f"“{query}”匹配到多个代币，请选择具体的合约地址"
+                if resolution.ambiguous
+                else f"没有找到代币“{query}”，可以换合约地址或更完整的名称"
+            )
+            empty = ConcentrationReport(
+                chain=chain,
+                token=query,
+                scanned_ms=int(time.time() * 1000),
+                error=message,
+            )
+            result = {
+                "type": "whale_scan",
+                "chain": chain,
+                "token": query,
+                "query": query,
+                "limit": limit,
+                "report": empty.to_dict(),
+                "resolved": resolution.to_dict(),
+                "previous": None,
+                "history": [],
+                "generated_at": int(time.time() * 1000),
+            }
+            self.holder_scan_cache[cache_key] = (now, result)
+            return result
+
+        resolved = resolution.address
+        previous = self.store.get_whale_scan(chain, resolved)
+        report = scan_token(
+            adapter,
+            resolved,
+            limit=limit,
+            exclude_tags=self._holder_exclude_tags(),
+            exclude_addresses=self.config.whales.exclude_addresses,
+            exclude_keywords=self._holder_exclude_keywords(),
+        )
+        if not report.error:
+            self.store.save_whale_scan(report)
+            self.store.record_whale_history(report)
+        result = {
+            "type": "whale_scan",
+            "chain": chain,
+            "token": resolved,
+            "query": query,
+            "limit": limit,
+            "report": report.to_dict(),
+            "resolved": resolution.to_dict(),
+            "previous": previous,
+            "history": self.store.get_whale_history(chain, resolved, limit=30),
+            "generated_at": int(time.time() * 1000),
+        }
+        self.holder_scan_cache[cache_key] = (now, result)
+        return result
+
+    def whale_search(self, chain, query, limit=10):
+        text = str(query or "").strip()
+        if len(text) < 2:
+            raise ValueError("关键词至少 2 个字符")
+        try:
+            limit = int(limit)
+        except (TypeError, ValueError):
+            limit = 10
+        return {
+            "type": "whale_search",
+            "query": text,
+            "chain": str(chain or "").strip().lower(),
+            "results": search_tokens(
+                self.holder_adapters(),
+                text,
+                chain=str(chain or "").strip().lower() or None,
+                limit=max(1, min(30, limit)),
+            ),
+            "generated_at": int(time.time() * 1000),
+        }
+
+    def whale_mutate(self, kind, payload):
+        """kind = watch | token，action = add | remove。"""
+        action = str(payload.get("action") or "add").strip().lower()
+        chain = str(payload.get("chain") or "").strip().lower()
+        token = str(payload.get("token") or "").strip()
+        if not chain or not token:
+            raise ValueError("缺少链或代币")
+        now_ms = int(time.time() * 1000)
+
+        if kind == "watch":
+            address = str(payload.get("address") or "").strip()
+            if not address:
+                raise ValueError("缺少地址")
+            if action == "remove":
+                removed = self.store.remove_whale_watch(
+                    self.web_chat_id, chain, token, address
+                )
+                return {"removed": bool(removed)}
+            whales = self.config.whales
+            self.store.upsert_whale_watch(
+                self.web_chat_id,
+                {
+                    "chain": chain,
+                    "token": token,
+                    "address": address,
+                    "symbol": str(payload.get("symbol") or token),
+                    "label": str(payload.get("label") or ""),
+                    "decimals": payload.get("decimals"),
+                    "interval_s": whales.watch_interval_minutes * 60.0,
+                    "min_delta_pct": whales.min_delta_pct,
+                    "min_delta_abs": whales.min_delta_abs,
+                },
+                now_ms,
+            )
+            return {"added": True}
+
+        if action == "remove":
+            removed = self.store.remove_whale_token(self.web_chat_id, chain, token)
+            return {"removed": bool(removed)}
+        whales = self.config.whales
+        self.store.upsert_whale_token(
+            self.web_chat_id,
+            {
+                "chain": chain,
+                "token": token,
+                "symbol": str(payload.get("label") or payload.get("symbol") or token),
+                "label": str(payload.get("label") or ""),
+                "interval_s": whales.scan_interval_hours * 3600.0,
+            },
+            now_ms,
+        )
+        return {"added": True}
+
+    def whale_check(self):
+        """立即刷新一次监控地址余额，返回最新的整体数据。"""
+        watcher = WhaleWatcher(
+            self.holder_adapters(),
+            self.store,
+            interval=self.config.whales.watch_interval_minutes * 60.0,
+            exclude_tags=self._holder_exclude_tags(),
+            exclude_addresses=self.config.whales.exclude_addresses,
+            exclude_keywords=self._holder_exclude_keywords(),
+            concentration_threshold=self.config.whales.concentration_threshold,
+        )
+        watcher.check_addresses(force=True, chat_id=self.web_chat_id)
+        return self.whale_data()
+
+
 class WebRequestHandler(BaseHTTPRequestHandler):
     server_version = "hlmonitor-web/" + __version__
     app: WebApp
@@ -736,6 +1128,7 @@ class WebRequestHandler(BaseHTTPRequestHandler):
                         "network": self.app.config.network,
                         "version": __version__,
                         "accounts": self.app.accounts(),
+                        "settings": self.app.public_settings(),
                     },
                 )
             elif path == "/api/overview":
@@ -761,6 +1154,29 @@ class WebRequestHandler(BaseHTTPRequestHandler):
                         (query.get("merge") or ["1"])[0],
                     ),
                 )
+            elif path == "/api/settings":
+                self._send_json(200, self.app.settings_data())
+            elif path == "/api/whale":
+                self._send_json(200, self.app.whale_data())
+            elif path == "/api/whale/search":
+                self._send_json(
+                    200,
+                    self.app.whale_search(
+                        (query.get("chain") or [""])[0],
+                        (query.get("q") or [""])[0],
+                        (query.get("limit") or ["10"])[0],
+                    ),
+                )
+            elif path == "/api/whale/scan":
+                self._send_json(
+                    200,
+                    self.app.whale_scan(
+                        (query.get("chain") or [""])[0],
+                        (query.get("token") or [""])[0],
+                        (query.get("limit") or [""])[0],
+                        (query.get("force") or ["0"])[0] == "1",
+                    ),
+                )
             elif path == "/api/autohunt":
                 self._send_json(200, self.app.autohunt_data())
             elif path == "/api/events":
@@ -780,6 +1196,19 @@ class WebRequestHandler(BaseHTTPRequestHandler):
             if path == "/api/accounts":
                 item = self.app.add_account(data.get("address", ""), data.get("alias", ""))
                 self._send_json(200, {"account": item})
+            elif path == "/api/settings":
+                if data.get("reset"):
+                    self._send_json(200, self.app.reset_settings())
+                else:
+                    self._send_json(
+                        200, self.app.update_settings(data.get("values") or {})
+                    )
+            elif path == "/api/whale/watch":
+                self._send_json(200, self.app.whale_mutate("watch", data))
+            elif path == "/api/whale/token":
+                self._send_json(200, self.app.whale_mutate("token", data))
+            elif path == "/api/whale/check":
+                self._send_json(200, self.app.whale_check())
             else:
                 self._send_json(404, {"error": "API not found"})
         except Exception as exc:

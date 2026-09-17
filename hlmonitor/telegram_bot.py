@@ -32,13 +32,27 @@ from .format import (
     fmt_szi,
     fmt_time,
     fmt_time_min,
-    fmt_usd_cn,
+    fmt_usd_amount,
     short_addr,
 )
 from .hunter import _build_coin_dex_map, attach_charts, format_account_card_html, scan
 from .monitor import AddressMonitor
 from .net import build_opener
 from .state import EventStore
+from .whale import (
+    DEFAULT_EXCLUDE_LABEL_KEYWORDS,
+    DEFAULT_EXCLUDE_TAGS,
+    DataSourceError,
+    WhaleWatcher,
+    build_adapters,
+    describe_chains,
+    format_scan_html,
+    format_watchlist_html,
+    resolve_token,
+    scan_token,
+    search_tokens,
+    split_ref,
+)
 
 
 HELP_TEXT = """Hyperliquid 地址监控 Bot
@@ -67,6 +81,11 @@ Hunt 系列
 /orders hunt 名称 [标的] — 自动账户挂单密集区
 /huntlist — 已收集大户账户
 
+链上筹码
+/whale — 链上筹码集中度与巨鲸监控
+/whale scan <链>:<代币> — 扫描单地址控盘比例
+/whale watch <链>:<代币> — 订阅筹码结构变化
+
 其他
 /coins — 选择成交通知币种
 /mute — 暂停当前聊天告警
@@ -77,6 +96,27 @@ Hunt 系列
 告警会自动发送到添加地址时所在的聊天。
 持仓简报下方有按钮，可切换按仓位价值或开仓时间排序。
 成交通知会自动汇总为多档周期（5分钟/15分钟/1小时/4小时/1天/3天/1周）。"""
+
+WHALE_HELP = """链上筹码集中度 / 巨鲸监控
+
+/whale scan <链>:<代币> [数量] — 扫描持仓集中度（代币可填符号，如 ARB）
+/whale find [链] <关键词> — 模糊检索代币合约
+/whale add <编号> [别名] — 把扫描结果里的地址加入监控
+/whale add <链>:<代币> <地址> [别名] — 直接监控链上地址
+/whale list — 监控地址与订阅代币
+/whale check — 立即查询一次链上余额
+/whale del <编号|地址> — 移除监控地址
+/whale watch <链>:<代币> [别名] — 订阅代币筹码结构复扫
+/whale watched — 只看订阅代币列表
+/whale unwatch <编号|链:代币> — 取消订阅
+/whale chains — 查看可用链
+
+例：/whale scan ethereum:0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48
+例：/whale scan zcash:native
+例：/whale add 1 主力钱包
+
+扫描会剔除交易所、跨链桥、DEX 池等多人共用地址，
+"最大非基础设施地址"才是真正的单地址控盘比例。"""
 
 
 
@@ -560,11 +600,11 @@ def format_fill_stats_html(
     page_coins = ordered[page * page_size : (page + 1) * page_size]
 
     total_notional = sum(item["notional"] for _, item in ordered)
-    lines.append(f"总成交额: {html.escape(fmt_usd_cn(total_notional))}")
+    lines.append(f"总成交额: {html.escape(fmt_usd_amount(total_notional))}")
 
     def pair_text(value, size):
         if value > 1e-9:
-            return f"{fmt_usd_cn(value)} / {fmt_szi(size)}"
+            return f"{fmt_usd_amount(value)} / {fmt_szi(size)}"
         return "-"
 
     chunks = []
@@ -587,7 +627,7 @@ def format_fill_stats_html(
             f"<td>买入</td><td>{html.escape(close_buy)}</td></tr>"
             f"<tr><td>卖出</td><td>{html.escape(open_sell)}</td>"
             f"<td>卖出</td><td>{html.escape(close_sell)}</td></tr>"
-            f"<tr><td>成交额</td><td>{html.escape(fmt_usd_cn(stat['notional']))}</td>"
+            f"<tr><td>成交额</td><td>{html.escape(fmt_usd_amount(stat['notional']))}</td>"
             f"<td>最近</td><td>{html.escape(fmt_time_min(stat['last_time']))}</td></tr>"
         )
         chunks.append(
@@ -637,7 +677,7 @@ def format_fill_timeline_html(
         label = fmt_dir(fill.get("dir")) or fmt_side(fill.get("side"))
         rows.append(
             f"{fmt_time_min(fill.get('time'))} {coin} {label} "
-            f"{fmt_szi(size)} @ {fmt_qty(price)} ≈{fmt_usd_cn(size * price)}"
+            f"{fmt_szi(size)} @ {fmt_qty(price)} ≈{fmt_usd_amount(size * price)}"
         )
     lines.append("")
     lines.append(
@@ -733,7 +773,7 @@ def format_fill_intervals_html(
     total_notional = sum(
         abs(_as_float(f.get("sz"))) * _as_float(f.get("px")) for f in recent
     )
-    lines.append(f"总成交额: {html.escape(fmt_usd_cn(total_notional))}")
+    lines.append(f"总成交额: {html.escape(fmt_usd_amount(total_notional))}")
 
     coin_notional = {}
     for fill in recent:
@@ -786,7 +826,7 @@ def format_fill_intervals_html(
                     f"<td>{range_label}</td><td>{html.escape(range_value)}</td></tr>"
                     f"<tr><td>均价</td><td>{fmt_qty(stat['avg_px'])}</td>"
                     f"<td>数量</td><td>{html.escape(fmt_szi(stat['total_sz']))}</td></tr>"
-                    f"<tr><td>金额</td><td>{html.escape(fmt_usd_cn(stat['total_value']))}</td>"
+                    f"<tr><td>金额</td><td>{html.escape(fmt_usd_amount(stat['total_value']))}</td>"
                     f"<td>时间</td><td>{html.escape(f'{fmt_time_min(stat["first_time"])} – {fmt_time_min(stat["last_time"])}')}</td></tr>"
                 )
                 table = f"<table bordered compact>{rows}</table>"
@@ -1575,6 +1615,8 @@ class TelegramBot:
         self._hunt_universe_cache_at = 0
         self._auto_thread = None
         self._auto_run_lock = threading.Lock()
+        self._whale_watcher = None
+        self._whale_adapter_cache = None
 
     def start(self):
         self.client.delete_webhook()
@@ -1598,6 +1640,13 @@ class TelegramBot:
             daemon=True,
         )
         self._auto_thread.start()
+
+        if self.config.whales.enabled:
+            threading.Thread(
+                target=self._whale_loop,
+                name="whale-loop",
+                daemon=True,
+            ).start()
 
     def _seed_default_subscriptions(self):
         if self.store.all_watched_addresses(active_only=False):
@@ -1634,6 +1683,8 @@ class TelegramBot:
         if self._stop.is_set():
             return
         self._stop.set()
+        if self._whale_watcher is not None:
+            self._whale_watcher.stop()
         self.monitor.stop()
         self.store.close()
         print("[telegram] Bot 已停止")
@@ -2598,6 +2649,8 @@ class TelegramBot:
                 self._cmd_zones(chat_id, args.strip()[4:].strip())
             else:
                 self._cmd_orders(chat_id, args)
+        elif command in {"/whale", "/whales"}:
+            self._cmd_whale(chat_id, args)
         elif command == "/recent":
             self._cmd_recent(chat_id, args)
         elif command == "/update":
@@ -3662,7 +3715,7 @@ class TelegramBot:
             for item in shown:
                 label = (
                     f"{item['label']} · {item['count']}笔 · "
-                    f"≈{fmt_usd_cn(item['value'])}"
+                    f"≈{fmt_usd_amount(item['value'])}"
                 )
                 row.append(
                     {
@@ -4116,6 +4169,660 @@ class TelegramBot:
             )
         self.client.send_message(chat_id, "\n".join(lines))
 
+    # ---------- 链上筹码集中度 / 巨鲸监控 ----------
+
+    def _whale_adapters(self):
+        if self._whale_adapter_cache is None:
+            self._whale_adapter_cache = build_adapters(
+                self.config.whales, proxy_url=self.config.proxy_url
+            )
+        return self._whale_adapter_cache
+
+    def _whale_exclude_tags(self):
+        extra = {
+            str(item).lower() for item in (self.config.whales.exclude_tags or [])
+        }
+        return set(DEFAULT_EXCLUDE_TAGS) | extra
+
+    def _whale_exclude_keywords(self):
+        extra = tuple(
+            str(item).lower()
+            for item in (self.config.whales.exclude_label_keywords or [])
+        )
+        return tuple(DEFAULT_EXCLUDE_LABEL_KEYWORDS) + extra
+
+    def _whale_watcher_instance(self):
+        if self._whale_watcher is None:
+            whales = self.config.whales
+            self._whale_watcher = WhaleWatcher(
+                self._whale_adapters(),
+                self.store,
+                interval=whales.watch_interval_minutes * 60.0,
+                exclude_tags=self._whale_exclude_tags(),
+                exclude_addresses=whales.exclude_addresses,
+                exclude_keywords=self._whale_exclude_keywords(),
+                concentration_threshold=whales.concentration_threshold,
+                log=lambda message: print(message),
+            )
+        return self._whale_watcher
+
+    def _whale_loop(self):
+        watcher = self._whale_watcher_instance()
+        while not self._stop.is_set():
+            if self._stop.wait(20):
+                return
+            try:
+                self._dispatch_whale_alerts(watcher.check_addresses())
+                self._dispatch_whale_alerts(watcher.check_tokens())
+            except Exception as exc:
+                print(f"[whale] loop error: {exc}")
+
+    def _dispatch_whale_alerts(self, alerts):
+        for alert in alerts or []:
+            if not alert.chat_id:
+                continue
+            try:
+                self.client.send_message(
+                    alert.chat_id, alert.text, parse_mode="HTML"
+                )
+            except Exception as exc:
+                print(f"[whale] 发送告警失败 ({alert.chat_id}): {exc}")
+
+    def _whale_last_scan(self, chat_id):
+        ref = str(self.store.get_chat_setting(chat_id, "whale_last_scan", "") or "")
+        if not ref:
+            return None
+        chain, token = split_ref(ref)
+        data = self.store.get_whale_scan(chain, token)
+        if not data:
+            return None
+        return chain, token, data
+
+    def _whale_resolve_symbol(self, chat_id, chain, token, entry, now_ms, label=""):
+        """后台补齐代币符号与精度，失败不影响监控本身。"""
+        adapter = self._whale_adapters().get(chain)
+        if adapter is None:
+            return
+
+        def work():
+            try:
+                meta = adapter.fetch_token_meta(token)
+            except Exception:
+                return
+            if meta is None:
+                return
+            entry["symbol"] = meta.symbol or entry.get("symbol") or token
+            entry["decimals"] = meta.decimals
+            if not entry.get("label") and label:
+                entry["label"] = label
+            try:
+                if entry.get("kind") == "token":
+                    self.store.upsert_whale_token(chat_id, entry, now_ms)
+                else:
+                    self.store.upsert_whale_watch(chat_id, entry, now_ms)
+            except Exception as exc:
+                print(f"[whale] 更新代币信息失败: {exc}")
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _cmd_whale(self, chat_id, args):
+        parts = str(args or "").strip().split()
+        if not parts:
+            self._whale_overview(chat_id)
+            return
+        action = parts[0].lower()
+        rest = parts[1:]
+        handlers = {
+            "scan": self._whale_scan,
+            "add": self._whale_add,
+            "del": self._whale_del,
+            "remove": self._whale_del,
+            "list": self._whale_list,
+            "check": self._whale_check,
+            "watch": self._whale_watch,
+            "watched": self._whale_watched,
+            "unwatch": self._whale_unwatch,
+            "chains": self._whale_chains,
+            "find": self._whale_find,
+            "search": self._whale_find,
+        }
+        handler = handlers.get(action)
+        if handler is None:
+            self.client.send_message(
+                chat_id, "未知子命令。\n\n" + WHALE_HELP
+            )
+            return
+        handler(chat_id, rest)
+
+    def _whale_overview(self, chat_id):
+        watches = self.store.get_whale_watches(chat_id=chat_id)
+        tokens = self.store.get_whale_tokens(chat_id=chat_id)
+        lines = [
+            "<b>🐋 链上筹码集中度监控</b>",
+            f"监控地址 {len(watches)} 个 · 订阅代币 {len(tokens)} 个",
+            "",
+            WHALE_HELP,
+        ]
+        self.client.send_message(chat_id, "\n".join(lines), parse_mode="HTML")
+
+    def _whale_chains(self, chat_id, parts):
+        lines = [
+            "<b>可用链</b>",
+            html.escape(describe_chains(self._whale_adapters())),
+            "",
+            "用法：/whale scan &lt;链&gt;:&lt;代币合约&gt;",
+        ]
+        self.client.send_message(chat_id, "\n".join(lines), parse_mode="HTML")
+
+    def _whale_scan(self, chat_id, parts):
+        if not parts:
+            self.client.send_message(
+                chat_id,
+                "用法：/whale scan <链>:<代币> [数量]\n"
+                "代币可以填符号（会自动解析成合约地址）或直接填合约。\n"
+                "例：/whale scan arbitrum:ARB\n"
+                "例：/whale scan ethereum:0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48\n"
+                "例：/whale scan zcash:native",
+            )
+            return
+        chain, token = split_ref(parts[0])
+        limit = self.config.whales.scan_limit
+        if len(parts) > 1:
+            try:
+                limit = max(5, min(200, int(parts[1])))
+            except (TypeError, ValueError):
+                pass
+
+        adapter = self._whale_adapters().get(chain)
+        if adapter is None:
+            self.client.send_message(
+                chat_id, f"不支持的链 {chain}，用 /whale chains 查看可用链。"
+            )
+            return
+        if not adapter.supports_scan():
+            self.client.send_message(
+                chat_id,
+                f"{adapter.name} 没有免费的持仓榜接口，"
+                "只能监控已知地址（/whale add）。",
+            )
+            return
+
+        placeholder_id = self._send_loading(
+            chat_id, f"⏳ 正在扫描 {chain} 持仓分布…"
+        )
+
+        def work():
+            try:
+                resolution = resolve_token(adapter, token)
+                if not resolution.ok:
+                    if resolution.candidates:
+                        head = (
+                            f"「{html.escape(token)}」匹配到多个代币，选一个再扫："
+                            if resolution.ambiguous
+                            else f"没有精确匹配「{html.escape(token)}」，是不是想找："
+                        )
+                        lines = [head]
+                        for index, item in enumerate(resolution.candidates[:8], 1):
+                            lines.append(
+                                f"{index}. <b>{html.escape(item.get('symbol') or '?')}</b> "
+                                f"{html.escape((item.get('name') or '')[:32])}\n"
+                                f"    <code>{html.escape(item.get('address') or '')}</code>"
+                            )
+                        lines.append("")
+                        lines.append(
+                            f"扫描：/whale scan {html.escape(chain)}:&lt;合约地址&gt;"
+                        )
+                        text = "\n".join(lines)
+                    else:
+                        text = (
+                            f"没有找到代币「{html.escape(token)}」，"
+                            f"可以换更完整的名称或直接填合约地址。\n"
+                            f"也可以先用 /whale find {html.escape(chain)} "
+                            f"{html.escape(token)} 检索。"
+                        )
+                    if placeholder_id is not None:
+                        self.client.edit_message_text(
+                            chat_id, placeholder_id, text, parse_mode="HTML"
+                        )
+                    else:
+                        self.client.send_message(chat_id, text, parse_mode="HTML")
+                    return
+
+                resolved = resolution.address
+                previous = self.store.get_whale_scan(chain, resolved)
+                report = scan_token(
+                    adapter,
+                    resolved,
+                    limit=limit,
+                    exclude_tags=self._whale_exclude_tags(),
+                    exclude_addresses=self.config.whales.exclude_addresses,
+                    exclude_keywords=self._whale_exclude_keywords(),
+                )
+                trend = None
+                if previous:
+                    trend = {
+                        "time": fmt_time(previous.get("scanned_ms")),
+                        "whale_pct": previous.get("whale_pct"),
+                    }
+                if not report.error:
+                    self.store.save_whale_scan(report)
+                    self.store.record_whale_history(report)
+                    self.store.set_chat_setting(
+                        chat_id,
+                        "whale_last_scan",
+                        f"{chain}:{resolved}",
+                        int(time.time() * 1000),
+                    )
+                text = format_scan_html(
+                    report,
+                    trend=trend,
+                    max_rows=self.config.whales.max_rows,
+                )
+                if resolution.changed:
+                    text = (
+                        f"「{html.escape(token)}」→ "
+                        f"<code>{html.escape(resolved)}</code>\n" + text
+                    )
+                if placeholder_id is not None:
+                    self.client.edit_message_text(
+                        chat_id, placeholder_id, text, parse_mode="HTML"
+                    )
+                else:
+                    self.client.send_message(chat_id, text, parse_mode="HTML")
+            except Exception as exc:
+                print(f"[whale] 扫描失败: {exc}")
+                error_text = f"扫描失败: {exc}"
+                if placeholder_id is not None:
+                    try:
+                        self.client.edit_message_text(
+                            chat_id, placeholder_id, error_text
+                        )
+                        return
+                    except Exception:
+                        pass
+                self.client.send_message(chat_id, error_text)
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _whale_find(self, chat_id, parts):
+        if not parts:
+            self.client.send_message(
+                chat_id,
+                "用法：/whale find [链] <关键词>\n"
+                "例：/whale find arbitrum ARB\n"
+                "例：/whale find USDC（跨链检索）",
+            )
+            return
+        chain = ""
+        if len(parts) >= 2 and parts[0].lower() in self._whale_adapters():
+            chain = parts[0].lower()
+            query = " ".join(parts[1:]).strip()
+        else:
+            query = " ".join(parts).strip()
+        if len(query) < 2:
+            self.client.send_message(chat_id, "关键词至少 2 个字符。")
+            return
+
+        placeholder_id = self._send_loading(chat_id, f"⏳ 正在检索 {query}…")
+
+        def work():
+            try:
+                rows = search_tokens(
+                    self._whale_adapters(), query, chain=chain or None, limit=10
+                )
+                if not rows:
+                    text = (
+                        f"没有找到「{html.escape(query)}」相关的代币，"
+                        "换个关键词或直接填合约地址。"
+                    )
+                else:
+                    lines = [f"<b>🔍 {html.escape(query)} 的检索结果</b>"]
+                    for index, item in enumerate(rows, 1):
+                        extra = ""
+                        if item.get("market_cap"):
+                            extra = f" · 市值 {fmt_usd_amount(item['market_cap'])}"
+                        lines.append(
+                            f"{index}. <b>{html.escape(item.get('symbol') or '?')}</b> "
+                            f"<code>{html.escape(item.get('chain') or '')}</code>{extra}\n"
+                            f"    {html.escape((item.get('name') or '')[:36])}\n"
+                            f"    <code>{html.escape(item.get('address') or '')}</code>"
+                        )
+                    lines.append("")
+                    lines.append(
+                        f"直接用符号扫描：/whale scan &lt;链&gt;:"
+                        f"{html.escape(query)}"
+                    )
+                    text = "\n".join(lines)
+                if placeholder_id is not None:
+                    self.client.edit_message_text(
+                        chat_id, placeholder_id, text, parse_mode="HTML"
+                    )
+                else:
+                    self.client.send_message(chat_id, text, parse_mode="HTML")
+            except Exception as exc:
+                print(f"[whale] 检索失败: {exc}")
+                error_text = f"检索失败: {exc}"
+                if placeholder_id is not None:
+                    try:
+                        self.client.edit_message_text(
+                            chat_id, placeholder_id, error_text
+                        )
+                        return
+                    except Exception:
+                        pass
+                self.client.send_message(chat_id, error_text)
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _whale_add(self, chat_id, parts):
+        if not parts:
+            self.client.send_message(
+                chat_id,
+                "用法：\n"
+                "/whale add <扫描结果编号> [别名]\n"
+                "/whale add <链>:<代币> <地址> [别名]",
+            )
+            return
+        whales = self.config.whales
+        now_ms = int(time.time() * 1000)
+
+        # 形式一：编号，引用最近一次扫描结果里的地址。
+        if parts[0].isdigit() and int(parts[0]) <= 200:
+            scan = self._whale_last_scan(chat_id)
+            if scan is None:
+                self.client.send_message(
+                    chat_id, "还没有扫描结果，先 /whale scan <链>:<代币>。"
+                )
+                return
+            chain, token, data = scan
+            holders = (data or {}).get("holders") or []
+            index = int(parts[0])
+            if index < 1 or index > len(holders):
+                self.client.send_message(
+                    chat_id,
+                    f"编号超出范围，最近一次扫描共 {len(holders)} 个地址。",
+                )
+                return
+            item = holders[index - 1]
+            alias = " ".join(parts[1:]).strip()
+            entry = {
+                "chain": chain,
+                "token": token,
+                "address": str(item.get("address") or ""),
+                "symbol": str((data or {}).get("symbol") or token),
+                "label": alias,
+                "decimals": (data or {}).get("decimals"),
+                "interval_s": whales.watch_interval_minutes * 60.0,
+                "min_delta_pct": whales.min_delta_pct,
+                "min_delta_abs": whales.min_delta_abs,
+            }
+            if not entry["address"]:
+                self.client.send_message(chat_id, "该编号没有有效地址。")
+                return
+            self.store.upsert_whale_watch(chat_id, entry, now_ms)
+            self._whale_confirm_add(chat_id, entry)
+            return
+
+        # 形式二：直接指定链、代币与地址。
+        if ":" not in parts[0] or len(parts) < 2:
+            self.client.send_message(
+                chat_id,
+                "用法：/whale add <链>:<代币> <地址> [别名]",
+            )
+            return
+        chain, token = split_ref(parts[0])
+        address = parts[1].strip()
+        alias = " ".join(parts[2:]).strip()
+        adapter = self._whale_adapters().get(chain)
+        if adapter is None:
+            self.client.send_message(
+                chat_id, f"不支持的链 {chain}，用 /whale chains 查看。"
+            )
+            return
+        entry = {
+            "chain": chain,
+            "token": token,
+            "address": address,
+            "symbol": token,
+            "label": alias,
+            "decimals": None,
+            "interval_s": whales.watch_interval_minutes * 60.0,
+            "min_delta_pct": whales.min_delta_pct,
+            "min_delta_abs": whales.min_delta_abs,
+        }
+        self.store.upsert_whale_watch(chat_id, entry, now_ms)
+        self._whale_confirm_add(chat_id, entry)
+        self._whale_resolve_symbol(
+            chat_id, chain, token, dict(entry), now_ms, label=alias
+        )
+
+    def _whale_confirm_add(self, chat_id, entry):
+        whales = self.config.whales
+        name = entry.get("label") or entry.get("symbol") or entry.get("token")
+        self.client.send_message(
+            chat_id,
+            f"已加入监控：<b>{html.escape(str(name))}</b>\n"
+            f"链 <code>{html.escape(str(entry.get('chain')))}</code> · "
+            f"地址 <code>{html.escape(str(entry.get('address')))}</code>\n"
+            f"首次检查写入基线，之后余额变化超过 "
+            f"{whales.min_delta_pct:g}% 才告警。",
+            parse_mode="HTML",
+        )
+
+    def _whale_del(self, chat_id, parts):
+        watches = self.store.get_whale_watches(chat_id=chat_id)
+        if not watches:
+            self.client.send_message(chat_id, "还没有监控地址。")
+            return
+        if not parts:
+            self.client.send_message(
+                chat_id, "用法：/whale del <编号|地址>，编号见 /whale list。"
+            )
+            return
+        target = parts[0].strip()
+        entry = None
+        if target.isdigit() and 1 <= int(target) <= len(watches):
+            entry = watches[int(target) - 1]
+        else:
+            lowered = target.lower()
+            for item in watches:
+                if str(item.get("address") or "").lower() == lowered:
+                    entry = item
+                    break
+        if entry is None:
+            self.client.send_message(
+                chat_id, "找不到该地址，先用 /whale list 查看编号。"
+            )
+            return
+        removed = self.store.remove_whale_watch(
+            chat_id, entry["chain"], entry["token"], entry["address"]
+        )
+        if removed:
+            name = entry.get("label") or entry.get("symbol") or entry["address"]
+            self.client.send_message(
+                chat_id, f"已移除监控：{html.escape(str(name))}"
+            )
+        else:
+            self.client.send_message(chat_id, "移除失败，请重试。")
+
+    def _whale_list(self, chat_id, parts):
+        watches = self.store.get_whale_watches(chat_id=chat_id)
+        tokens = self.store.get_whale_tokens(chat_id=chat_id)
+        lines = []
+        if watches:
+            balances = {
+                (item["chain"], item["token"], item["address"]): item.get(
+                    "last_balance"
+                )
+                for item in watches
+                if item.get("last_balance") is not None
+            }
+            lines.append(f"<b>监控地址（{len(watches)}）</b>")
+            lines.append(format_watchlist_html(watches, balances))
+        else:
+            lines.append("还没有监控地址，用 /whale add 添加。")
+        if tokens:
+            lines.append("")
+            lines.append(f"<b>订阅代币（{len(tokens)}）</b>")
+            for index, item in enumerate(tokens, 1):
+                name = item.get("symbol") or item.get("token")
+                extra = ""
+                if item.get("last_top_pct") is not None:
+                    extra = (
+                        f" · 最大非基础设施 "
+                        f"{float(item['last_top_pct']):.2f}%"
+                    )
+                lines.append(
+                    f"{index}. <b>{html.escape(str(name))}</b> "
+                    f"<code>{html.escape(str(item['chain']))}</code>{extra}"
+                )
+        self.client.send_message(chat_id, "\n".join(lines), parse_mode="HTML")
+
+    def _whale_check(self, chat_id, parts):
+        placeholder_id = self._send_loading(chat_id, "⏳ 正在查询链上余额…")
+        watcher = self._whale_watcher_instance()
+
+        def work():
+            try:
+                alerts = watcher.check_addresses(force=True, chat_id=str(chat_id))
+                self._dispatch_whale_alerts(alerts)
+                watches = self.store.get_whale_watches(chat_id=chat_id)
+                if not watches:
+                    text = "还没有监控地址。"
+                else:
+                    balances = {
+                        (item["chain"], item["token"], item["address"]): item.get(
+                            "last_balance"
+                        )
+                        for item in watches
+                    }
+                    lines = [
+                        "<b>链上余额</b>",
+                        format_watchlist_html(watches, balances),
+                    ]
+                    failures = [item for item in watches if item.get("last_error")]
+                    if failures:
+                        lines.append("")
+                        lines.append("查询失败：")
+                        for item in failures[:5]:
+                            lines.append(
+                                f"- <code>{html.escape(str(item['address']))}</code>: "
+                                f"{html.escape(str(item['last_error'])[:120])}"
+                            )
+                    text = "\n".join(lines)
+                if placeholder_id is not None:
+                    self.client.edit_message_text(
+                        chat_id, placeholder_id, text, parse_mode="HTML"
+                    )
+                else:
+                    self.client.send_message(chat_id, text, parse_mode="HTML")
+            except Exception as exc:
+                print(f"[whale] 查询余额失败: {exc}")
+                if placeholder_id is not None:
+                    try:
+                        self.client.edit_message_text(
+                            chat_id, placeholder_id, f"查询失败: {exc}"
+                        )
+                        return
+                    except Exception:
+                        pass
+                self.client.send_message(chat_id, f"查询失败: {exc}")
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _whale_watch(self, chat_id, parts):
+        if not parts:
+            self.client.send_message(
+                chat_id, "用法：/whale watch <链>:<代币> [别名]"
+            )
+            return
+        chain, token = split_ref(parts[0])
+        alias = " ".join(parts[1:]).strip()
+        adapter = self._whale_adapters().get(chain)
+        if adapter is None:
+            self.client.send_message(
+                chat_id, f"不支持的链 {chain}，用 /whale chains 查看。"
+            )
+            return
+        if not adapter.supports_scan():
+            self.client.send_message(
+                chat_id,
+                f"{adapter.name} 没有免费持仓榜接口，无法订阅筹码复扫。",
+            )
+            return
+        whales = self.config.whales
+        now_ms = int(time.time() * 1000)
+        entry = {
+            "chain": chain,
+            "token": token,
+            "symbol": alias or token,
+            "label": alias,
+            "interval_s": whales.scan_interval_hours * 3600.0,
+            "kind": "token",
+        }
+        self.store.upsert_whale_token(chat_id, entry, now_ms)
+        self.client.send_message(
+            chat_id,
+            f"已订阅 <code>{html.escape(chain)}:{html.escape(token)}</code>，"
+            f"每 {whales.scan_interval_hours:g} 小时复扫一次筹码结构。",
+            parse_mode="HTML",
+        )
+        self._whale_resolve_symbol(
+            chat_id, chain, token, dict(entry), now_ms, label=alias
+        )
+
+    def _whale_watched(self, chat_id, parts):
+        tokens = self.store.get_whale_tokens(chat_id=chat_id)
+        if not tokens:
+            self.client.send_message(
+                chat_id, "还没有订阅代币，用 /whale watch <链>:<代币> 添加。"
+            )
+            return
+        lines = ["<b>订阅代币</b>"]
+        for index, item in enumerate(tokens, 1):
+            name = item.get("symbol") or item.get("token")
+            lines.append(
+                f"{index}. <b>{html.escape(str(name))}</b> "
+                f"<code>{html.escape(str(item['chain']))}</code>"
+            )
+            if item.get("last_top_pct") is not None:
+                lines.append(
+                    f"    最大非基础设施 {float(item['last_top_pct']):.2f}% · "
+                    f"评分 {float(item.get('last_score') or 0):.0f}/100"
+                )
+            if item.get("last_error"):
+                lines.append(
+                    f"    上次失败：{html.escape(str(item['last_error'])[:120])}"
+                )
+        self.client.send_message(chat_id, "\n".join(lines), parse_mode="HTML")
+
+    def _whale_unwatch(self, chat_id, parts):
+        tokens = self.store.get_whale_tokens(chat_id=chat_id)
+        if not tokens:
+            self.client.send_message(chat_id, "还没有订阅代币。")
+            return
+        if not parts:
+            self.client.send_message(
+                chat_id, "用法：/whale unwatch <编号|链:代币>"
+            )
+            return
+        target = parts[0].strip()
+        entry = None
+        if target.isdigit() and 1 <= int(target) <= len(tokens):
+            entry = tokens[int(target) - 1]
+        else:
+            chain, token = split_ref(target)
+            for item in tokens:
+                if item["chain"] == chain and item["token"] == token:
+                    entry = item
+                    break
+        if entry is None:
+            self.client.send_message(chat_id, "找不到该订阅。")
+            return
+        if self.store.remove_whale_token(chat_id, entry["chain"], entry["token"]):
+            self.client.send_message(chat_id, "已取消订阅。")
+        else:
+            self.client.send_message(chat_id, "取消失败，请重试。")
     # ---------- auto hunt processes ----------
 
     @staticmethod
@@ -4684,7 +5391,7 @@ class TelegramBot:
                     f"<td>{marker}</td>"
                     f"<td>{price}</td>"
                     f"<td>{item['orders']}单/{item['accounts']}户</td>"
-                    f"<td>{fmt_usd_cn(item['value'])}</td>"
+                    f"<td>{fmt_usd_amount(item['value'])}</td>"
                     "</tr>"
                 )
             lines.append("</table>")
@@ -4714,7 +5421,7 @@ class TelegramBot:
                     price = f"{item['min_px']:,.2f}-{item['max_px']:,.2f}"
                 marker = self._fill_side_marker(item["side"])
                 bar = "-" * bar_len
-                chart.append(f"{marker} {price} {bar} | {fmt_usd_cn(item['value'])}")
+                chart.append(f"{marker} {price} {bar} | {fmt_usd_amount(item['value'])}")
             lines.append("<pre>" + "\n".join(html.escape(row) for row in chart) + "</pre>")
         lines.append("🟢 = 买入 · 🔴 = 卖出；每个标的内按价格从高到低排列。")
         return "\n".join(lines)
@@ -5091,7 +5798,7 @@ class TelegramBot:
                     price = f"{float(row.get('min_px') or 0):,.2f}-{float(row.get('max_px') or 0):,.2f}"
                 side = self._fill_side_marker(row.get("side"))
                 bar = "-" * bar_len
-                chart.append(f"{side} {price} {bar} | {fmt_usd_cn(row.get('value') or 0)}")
+                chart.append(f"{side} {price} {bar} | {fmt_usd_amount(row.get('value') or 0)}")
             return (
                 f"<b>{safe_coin}</b>\n<pre>"
                 + "\n".join(html.escape(row) for row in chart)
@@ -5114,7 +5821,7 @@ class TelegramBot:
                 f"<td>{marker}</td>"
                 f"<td>{price}</td>"
                 f"<td>{int(row.get('fills') or 0)}笔/{int(row.get('accounts') or 0)}户</td>"
-                f"<td>{fmt_usd_cn(row.get('value') or 0)}</td>"
+                f"<td>{fmt_usd_amount(row.get('value') or 0)}</td>"
                 "</tr>"
             )
         lines.append("</table>")

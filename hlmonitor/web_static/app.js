@@ -8,6 +8,12 @@ const state = {
   chartInterval: "15m",
   merge: Math.min(4, Math.max(0.25, parseFloat(localStorage.getItem("hl.merge")) || 1)),
   chartData: null,
+  whaleChain: localStorage.getItem("hl.whaleChain") || "",
+  whaleData: null,
+  whaleScan: null,
+  settingsData: null,
+  settingsInputs: null,
+  theme: null,
   overlays: { orders: true, fills: true, tpsl: true, volume: true, whale: false },
   busy: false,
   chart: null,
@@ -54,6 +60,13 @@ const els = {
   positionTooltip: document.getElementById("position-tooltip"),
   positionPopup: document.getElementById("position-popup"),
   priceAutoButton: document.getElementById("price-auto-button"),
+  whaleChain: document.getElementById("whale-chain"),
+  whaleToken: document.getElementById("whale-token"),
+  whaleScan: document.getElementById("whale-scan"),
+  whaleCheck: document.getElementById("whale-check"),
+  settingsSave: document.getElementById("settings-save"),
+  settingsReset: document.getElementById("settings-reset"),
+  brandText: document.getElementById("brand-text"),
 };
 
 function chartPanel() {
@@ -76,9 +89,7 @@ function syncChartFullscreen(active) {
 }
 
 const usd = new Intl.NumberFormat("en-US", { style: "currency", currency: "USD" });
-const compactUsd = new Intl.NumberFormat("en-US", {
-  style: "currency", currency: "USD", notation: "compact", maximumFractionDigits: 2,
-});
+
 const qty = new Intl.NumberFormat("en-US", { maximumFractionDigits: 6 });
 const priceUsd = new Intl.NumberFormat("en-US", {
   style: "currency", currency: "USD", minimumFractionDigits: 2, maximumFractionDigits: 8,
@@ -100,20 +111,33 @@ function shortAddress(address) {
   return address ? `${address.slice(0, 6)}...${address.slice(-4)}` : "";
 }
 
-function formatUsd(value, compact = false) {
-  return (compact ? compactUsd : usd).format(Number(value) || 0);
+// 金额风格由设置页统一控制，全站只走这一条格式化路径。
+const AMOUNT_FORMATS = ["cn", "compact", "full"];
+const AMOUNT_FORMAT_LABELS = { cn: "中文单位", compact: "英文紧凑", full: "完整数字" };
+
+function amountFormat() {
+  const style = (state.theme && state.theme.amount_format) || "compact";
+  return AMOUNT_FORMATS.includes(style) ? style : "compact";
 }
 
-function formatCnAmount(value) {
+function formatAmount(value) {
   const raw = Number(value);
   const number = Number.isFinite(raw) ? raw : 0;
   const abs = Math.abs(number);
-  const sign = '$';
-  if (abs >= 100000000) return sign + (number / 100000000).toFixed(2) + '亿';
-  if (abs >= 10000000) return sign + (number / 10000000).toFixed(2) + '千万';
-  if (abs >= 1000000) return sign + (number / 1000000).toFixed(2) + '百万';
-  if (abs >= 10000) return sign + (number / 10000).toFixed(2) + '万';
-  return usd.format(number);
+  const sign = number < 0 ? "-" : "";
+  const style = amountFormat();
+  if (style === "full") return sign + usd.format(abs);
+  if (style === "cn") {
+    if (abs >= 100000000) return sign + "$" + (abs / 100000000).toFixed(2) + "亿";
+    if (abs >= 10000000) return sign + "$" + (abs / 10000000).toFixed(2) + "千万";
+    if (abs >= 1000000) return sign + "$" + (abs / 1000000).toFixed(2) + "百万";
+    if (abs >= 10000) return sign + "$" + (abs / 10000).toFixed(2) + "万";
+    return sign + usd.format(abs);
+  }
+  if (abs >= 1000000000) return sign + "$" + (abs / 1000000000).toFixed(2) + "B";
+  if (abs >= 1000000) return sign + "$" + (abs / 1000000).toFixed(2) + "M";
+  if (abs >= 1000) return sign + "$" + (abs / 1000).toFixed(2) + "K";
+  return sign + usd.format(abs);
 }
 
 function priceFormat(value) {
@@ -122,7 +146,7 @@ function priceFormat(value) {
   return { type: "price", precision, minMove: Number((0.1 ** precision).toFixed(precision)) };
 }
 
-function signed(value, formatter = formatUsd) {
+function signed(value, formatter = formatAmount) {
   const number = Number(value) || 0;
   const text = formatter(Math.abs(number));
   return number > 0 ? `+${text}` : number < 0 ? `-${text}` : text;
@@ -154,6 +178,17 @@ async function request(url, options = {}) {
   const payload = await response.json().catch(() => ({}));
   if (!response.ok) throw new Error(payload.error || `HTTP ${response.status}`);
   return payload;
+}
+
+// 静态文件是热更新的，但 Python 路由只在新进程里生效；
+// 命中这个提示说明页面比后端新，需要重启服务。
+const RESTART_HINT =
+  "后端进程仍是旧版本，请重启 python -m hlmonitor.web 后刷新页面"
+  + "（静态文件会热更新，Python 路由不会）。";
+
+function apiErrorText(error) {
+  const message = String((error && error.message) || error || "未知错误");
+  return /API not found/i.test(message) ? RESTART_HINT : message;
 }
 
 function selectedAccount() {
@@ -295,17 +330,17 @@ function renderOverview(data, body) {
   const summary = data.summary || {};
   const metrics = make("div", "metrics");
   metrics.append(
-    metric("账户净值", formatUsd(summary.account_value)),
-    metric("可提取", formatUsd(summary.withdrawable)),
+    metric("账户净值", formatAmount(summary.account_value)),
+    metric("可提取", formatAmount(summary.withdrawable)),
     metric("浮动盈亏", signed(summary.unrealized_pnl), pnlClass(summary.unrealized_pnl)),
-    metric("持仓名义", formatUsd(summary.total_ntl_pos)),
+    metric("持仓名义", formatAmount(summary.total_ntl_pos)),
   );
   body.append(metrics, sectionTitle("合约持仓"));
   const rows = data.positions.map((row) => [
     cell(row.coin),
     cell(sideText(row)),
     cell(qty.format(Math.abs(row.szi))),
-    cell(formatUsd(row.notional)),
+    cell(formatAmount(row.notional)),
     cell(row.entry || "-"),
     cell(row.leverage ? `${row.leverage}x` : "-"),
     cell(signed(row.pnl), pnlClass(row.pnl)),
@@ -322,20 +357,20 @@ function renderOverview(data, body) {
 function renderFills(data, body) {
   const metrics = make("div", "metrics");
   metrics.append(
-    metric("成交额", formatUsd(data.notional, true)),
+    metric("成交额", formatAmount(data.notional)),
     metric("成交笔数", String(data.count)),
     metric("已实现盈亏", signed(data.realized_pnl), pnlClass(data.realized_pnl)),
     metric("窗口", data.window_label),
   );
   body.append(metrics, sectionTitle("币种统计"));
   body.append(table(["币种", "笔数", "成交额", "买入", "卖出", "盈亏"], data.coins.slice(0, 20).map((row) => [
-    cell(row.coin), cell(String(row.count)), cell(formatUsd(row.notional)),
-    cell(formatUsd(row.buy)), cell(formatUsd(row.sell)), cell(signed(row.pnl), pnlClass(row.pnl)),
+    cell(row.coin), cell(String(row.count)), cell(formatAmount(row.notional)),
+    cell(formatAmount(row.buy)), cell(formatAmount(row.sell)), cell(signed(row.pnl), pnlClass(row.pnl)),
   ])));
   body.append(sectionTitle("最近成交"));
   body.append(table(["时间", "币种", "方向", "数量", "价格", "金额", "盈亏"], data.recent.slice(0, 30).map((row) => [
     cell(timeText(row.time)), cell(row.coin), cell(sideText(row)), cell(qty.format(row.size)),
-    cell(qty.format(row.price)), cell(formatUsd(row.notional)), cell(signed(row.closed_pnl), pnlClass(row.closed_pnl)),
+    cell(qty.format(row.price)), cell(formatAmount(row.notional)), cell(signed(row.closed_pnl), pnlClass(row.closed_pnl)),
   ])));
 }
 
@@ -390,6 +425,7 @@ function ensureChart() {
     updateOrderZoneOverlays();
   });
   startOverlayLoop();
+  applyTheme(state.theme);
 }
 
 function clearPriceLines() {
@@ -420,7 +456,7 @@ function addRange(row) {
   const color = zoneColor(row);
   const label = `${row.side} ${row.count}笔`;
   if (Math.abs(row.max_px - row.min_px) < 1e-12) {
-    addPriceLine(row.avg_px, color, `${label} ${formatUsd(row.avg_px, true)}`, 2);
+    addPriceLine(row.avg_px, color, `${label} ${priceText(row.avg_px)}`, 2);
     return;
   }
   addPriceLine(row.max_px, color, `${label} 上沿`, 1);
@@ -562,7 +598,7 @@ function zoneKindLabel(row) {
 }
 function zoneTooltipText(row) {
   const accounts = row.accounts ? ` · ${row.accounts}账户` : "";
-  return `${zoneKindLabel(row)} · ${zoneDirectionLabel(row)} · ${row.count}笔${accounts} · ${formatCnAmount(row.total_value)}`;
+  return `${zoneKindLabel(row)} · ${zoneDirectionLabel(row)} · ${row.count}笔${accounts} · ${formatAmount(row.total_value)}`;
 }
 
 function showZoneTooltip(event, row) {
@@ -638,7 +674,7 @@ function renderZonePopup(row, event) {
     positionDetailRow(single ? "价格" : "价格区间", single ? priceText(row.min_px) : `${priceText(row.min_px)} – ${priceText(row.max_px)}`),
     positionDetailRow("加权均价", priceText(row.avg_px)),
     positionDetailRow("总数量", qty.format(row.total_sz)),
-    positionDetailRow("总金额", formatCnAmount(row.total_value)),
+    positionDetailRow("总金额", formatAmount(row.total_value)),
   );
   popup.replaceChildren(title, details);
   popup.hidden = false;
@@ -717,7 +753,7 @@ function renderPositionPopup(data, position, event) {
 
   const details = make("div", "position-detail");
   details.append(
-    positionDetailRow("名义价值", formatUsd(position.notional)),
+    positionDetailRow("名义价值", formatAmount(position.notional)),
     positionDetailRow("杠杆", leverage > 0 ? `${leverage}x` : "-"),
     positionDetailRow("收益率", `${roi >= 0 ? "+" : "-"}${Math.abs(roi).toFixed(2)}%`, pnlClass(roi)),
     positionDetailRow("更新时间", timeText(data.generated_at)),
@@ -954,7 +990,7 @@ function renderAutohunt(data, body) {
       const rows = row.accounts.map((acc) => [
         cell(acc.alias || "—"),
         cell(shortAddress(acc.address)),
-        cell(formatUsd(acc.account_value, true)),
+        cell(formatAmount(acc.account_value)),
         cell(relativeTime(acc.scanned_at)),
       ]);
       card.append(table(["命名", "地址", "账户价值", "收录时间"], rows));
@@ -969,14 +1005,752 @@ function renderAutohunt(data, body) {
     const rows = data.collected.slice(0, 100).map((row) => [
       cell(row.alias || "—"),
       cell(shortAddress(row.address)),
-      cell(formatUsd(row.account_value, true)),
-      cell(formatUsd(row.volume, true)),
+      cell(formatAmount(row.account_value)),
+      cell(formatAmount(row.volume)),
       cell(signed(row.pnl), pnlClass(row.pnl)),
       cell(`${(Number(row.roi) || 0).toFixed(1)}%`, pnlClass(row.roi)),
       cell(`${((Number(row.win_rate) || 0) * 100).toFixed(1)}%`),
       cell((Number(row.score) || 0).toFixed(2)),
     ]);
     body.append(table(["命名", "地址", "账户价值", "成交量", "盈亏", "ROI", "胜率", "评分"], rows));
+  }
+}
+// ---------------------------------------------------------------- 链上筹码
+
+function amountText(value) {
+  const number = Number(value);
+  if (!Number.isFinite(number) || number === 0) return "0";
+  const abs = Math.abs(number);
+  if (abs >= 1e9) return `${(number / 1e9).toFixed(2)}B`;
+  if (abs >= 1e6) return `${(number / 1e6).toFixed(2)}M`;
+  if (abs >= 1e3) return number.toLocaleString("en-US", { maximumFractionDigits: 0 });
+  if (abs >= 1) return number.toLocaleString("en-US", { maximumFractionDigits: 2 });
+  return number.toFixed(6).replace(/0+$/, "").replace(/\.$/, "");
+}
+
+function percentText(value, digits = 2) {
+  const number = Number(value);
+  return Number.isFinite(number) ? `${number.toFixed(digits)}%` : "—";
+}
+
+function addressCell(address) {
+  const node = cell(shortAddress(address));
+  node.title = address || "";
+  return node;
+}
+
+function rowActionButton(text, className, handler) {
+  const node = make("button", `row-button ${className}`.trim(), text);
+  node.type = "button";
+  node.addEventListener("click", handler);
+  return node;
+}
+
+function briefError(text) {
+  const raw = String(text || "").replace(/\s+/g, " ").trim();
+  if (!raw) return "";
+  return raw.length > 72 ? `${raw.slice(0, 72)}…` : raw;
+}
+
+function statusCell(row) {
+  const failed = Boolean(row.error);
+  const node = cell("", `onchain-status ${failed ? "error" : "ok"}`);
+  node.append(make("span", "onchain-status-tag", failed ? "失败" : "正常"));
+  if (failed) {
+    node.title = row.error;
+    node.append(make("span", "onchain-error-brief", briefError(row.error)));
+  }
+  return node;
+}
+
+function renderWhaleErrors(info, body) {
+  const failures = [];
+  for (const row of info.watches) {
+    if (!row.error) continue;
+    failures.push({
+      kind: "监控地址",
+      name: row.label || row.symbol || row.address,
+      target: `${row.chain} · ${row.address}`,
+      error: row.error,
+      at: row.checked_ms,
+    });
+  }
+  for (const row of info.tokens) {
+    if (!row.error) continue;
+    failures.push({
+      kind: "订阅代币",
+      name: row.symbol || row.token,
+      target: `${row.chain} · ${row.token}`,
+      error: row.error,
+      at: row.scanned_ms,
+    });
+  }
+  if (!failures.length) return;
+
+  const card = make("div", "onchain-card onchain-failure-card");
+  card.append(make("div", "onchain-title", `检查失败（${failures.length}）`));
+  const list = make("div", "onchain-failure-list");
+  for (const item of failures) {
+    const node = make("div", "onchain-failure-item");
+    const head = make("div", "onchain-failure-head");
+    head.append(make("span", "onchain-failure-kind", item.kind));
+    head.append(make("span", "onchain-failure-name", item.name));
+    if (item.at) head.append(make("span", "onchain-failure-time", relativeTime(item.at)));
+    node.append(head);
+    node.append(make("div", "onchain-failure-target", item.target));
+    node.append(make("div", "onchain-failure-message", item.error));
+    list.append(node);
+  }
+  card.append(list);
+  body.append(card);
+}
+
+function syncWhaleChains(chains) {
+  const select = els.whaleChain;
+  if (!select) return;
+  const wanted = state.whaleChain || select.value;
+  select.replaceChildren();
+  for (const chain of chains) {
+    const option = make("option", "", chain.scan ? chain.name : `${chain.name}（仅监控）`);
+    option.value = chain.id;
+    select.append(option);
+  }
+  const available = chains.map((chain) => chain.id);
+  const picked = available.includes(wanted) ? wanted : (available[0] || "");
+  select.value = picked;
+  state.whaleChain = picked;
+}
+
+function candidateButton(candidate) {
+  const node = make("button", "onchain-candidate");
+  node.type = "button";
+  node.title = `点击使用 ${candidate.address}`;
+  const head = make("div", "onchain-candidate-head");
+  head.append(make("span", "onchain-candidate-symbol", candidate.symbol || "?"));
+  head.append(make("span", "onchain-candidate-chain", candidate.chain || ""));
+  node.append(head);
+  if (candidate.name) node.append(make("div", "onchain-candidate-name", candidate.name));
+  const meta = [shortAddress(candidate.address)];
+  if (Number(candidate.market_cap) > 0) meta.push(`市值 ${formatAmount(candidate.market_cap)}`);
+  node.append(make("div", "onchain-candidate-meta", meta.join(" · ")));
+  node.addEventListener("click", () => {
+    if (candidate.chain) {
+      state.whaleChain = candidate.chain;
+      els.whaleChain.value = candidate.chain;
+    }
+    els.whaleToken.value = candidate.address;
+    runWhaleScan();
+  });
+  return node;
+}
+
+function renderWhaleScan(scan, body) {
+  const report = scan.report || {};
+  const card = make("div", "onchain-card");
+  const head = make("div", "onchain-head");
+  head.append(make("div", "onchain-title", `${report.symbol || scan.token} · ${scan.chain}`));
+  head.append(make("div", "onchain-score", `评分 ${Math.round(Number(report.score) || 0)}/100`));
+  card.append(head);
+
+  const resolved = scan.resolved || {};
+  if (resolved.changed && scan.token) {
+    const line = make("div", "onchain-hint");
+    line.append(make("span", "", `${resolved.symbol || scan.query || ""} 解析为 `));
+    line.append(make("code", "", scan.token));
+    card.append(line);
+  }
+
+  if (report.error) {
+    card.append(make("div", "state-error", report.error));
+    const candidates = resolved.candidates || [];
+    if (candidates.length) {
+      card.append(make("div", "onchain-hint", "点击下方候选填入合约地址后重新扫描："));
+      const list = make("div", "onchain-candidates");
+      for (const candidate of candidates) list.append(candidateButton(candidate));
+      card.append(list);
+    }
+    body.append(card);
+    return;
+  }
+
+  const metrics = make("div", "metrics");
+  metrics.append(
+    metric("最大非基础设施地址", percentText(report.whale_pct)),
+    metric("非基础设施前十大", percentText(report.whale10_pct)),
+    metric("全部口径 前1 / 前10", `${percentText(report.top1_pct)} / ${percentText(report.top10_pct)}`),
+    metric("流通量", amountText(report.supply)),
+    metric("持币地址", Number(report.holder_count || 0).toLocaleString("en-US")),
+    metric("价格", Number(report.price_usd) > 0 ? priceText(report.price_usd) : "—"),
+    metric("抓取地址数", String((report.holders || []).length)),
+    metric("扫描时间", timeText(scan.generated_at, false)),
+  );
+  card.append(metrics);
+
+  if (report.whale_address) {
+    const line = make("div", "onchain-hint");
+    line.append(make("span", "", "最大非基础设施地址："));
+    line.append(make("code", "", report.whale_address));
+    if (report.whale_label) line.append(make("span", "", `（${report.whale_label}）`));
+    card.append(line);
+  }
+
+  const rows = (report.holders || []).map((row) => {
+    const action = make("td");
+    action.append(rowActionButton(row.excluded ? "仍要监控" : "加入监控", "primary", async (event) => {
+      const button = event.currentTarget;
+      button.disabled = true;
+      try {
+        await request("/api/whale/watch", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            action: "add",
+            chain: scan.chain,
+            token: scan.token,
+            address: row.address,
+            symbol: report.symbol || scan.token,
+            label: row.label || "",
+            decimals: report.decimals,
+          }),
+        });
+        await refreshWhale();
+      } catch (error) {
+        showState("whale", "error", error.message);
+        button.disabled = false;
+      }
+    }));
+    return [
+      cell(String(row.rank)),
+      addressCell(row.address),
+      cell(amountText(row.balance)),
+      cell(percentText(row.pct)),
+      cell(row.excluded ? `🚫 ${row.exclude_reason || "已排除"}` : (row.label || "—")),
+      action,
+    ];
+  });
+  card.append(table(["#", "地址", "数量", "占比", "标签", ""], rows));
+
+  const foot = make("div", "onchain-actions");
+  foot.append(rowActionButton("订阅该币筹码复扫", "primary", async (event) => {
+    const button = event.currentTarget;
+    button.disabled = true;
+    try {
+      await request("/api/whale/token", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          action: "add",
+          chain: scan.chain,
+          token: scan.token,
+          label: report.symbol || "",
+        }),
+      });
+      await refreshWhale();
+    } catch (error) {
+      showState("whale", "error", error.message);
+    } finally {
+      button.disabled = false;
+    }
+  }));
+  foot.append(make("span", "onchain-note", "🚫 交易所/跨链桥/DEX 池等多人共用地址不计入单地址集中度"));
+  card.append(foot);
+  body.append(card);
+}
+
+function whaleAddForm(info) {
+  const wrap = make("div", "onchain-add");
+  const chainSelect = make("select", "chart-select");
+  for (const chain of info.chains) {
+    const option = make("option", "", chain.name);
+    option.value = chain.id;
+    chainSelect.append(option);
+  }
+  if (state.whaleChain) chainSelect.value = state.whaleChain;
+
+  const tokenInput = make("input", "onchain-input");
+  tokenInput.placeholder = "代币合约 / native";
+  tokenInput.autocomplete = "off";
+  tokenInput.spellcheck = false;
+  const addressInput = make("input", "onchain-input");
+  addressInput.placeholder = "地址";
+  addressInput.autocomplete = "off";
+  addressInput.spellcheck = false;
+  const labelInput = make("input", "onchain-input");
+  labelInput.placeholder = "备注（可选）";
+  labelInput.autocomplete = "off";
+
+  wrap.append(
+    chainSelect,
+    tokenInput,
+    addressInput,
+    labelInput,
+    rowActionButton("手动添加", "primary", async (event) => {
+      const button = event.currentTarget;
+      const chain = chainSelect.value;
+      const token = tokenInput.value.trim();
+      const address = addressInput.value.trim();
+      if (!chain || !token || !address) {
+        showState("whale", "error", "请填写链、代币合约和地址");
+        return;
+      }
+      button.disabled = true;
+      try {
+        await request("/api/whale/watch", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            action: "add", chain, token, address, label: labelInput.value.trim(),
+          }),
+        });
+        await refreshWhale();
+      } catch (error) {
+        showState("whale", "error", error.message);
+        button.disabled = false;
+      }
+    }),
+  );
+  return wrap;
+}
+
+function whaleGroupKey(row) {
+  const symbol = String(row.symbol || "").trim().toUpperCase();
+  if (symbol) return symbol;
+  const token = String(row.token || "").trim().toUpperCase();
+  return token || "未标注";
+}
+
+function collapsedGroups() {
+  try {
+    const raw = JSON.parse(localStorage.getItem("hl.whaleCollapsed") || "[]");
+    return new Set(Array.isArray(raw) ? raw : []);
+  } catch (_) {
+    return new Set();
+  }
+}
+
+function setGroupCollapsed(name, collapsed) {
+  const set = collapsedGroups();
+  if (collapsed) set.add(name);
+  else set.delete(name);
+  localStorage.setItem("hl.whaleCollapsed", JSON.stringify([...set]));
+}
+
+function whaleWatchRow(row) {
+  const action = make("td");
+  action.append(rowActionButton("移除", "danger", async (event) => {
+    const button = event.currentTarget;
+    button.disabled = true;
+    try {
+      await request("/api/whale/watch", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          action: "remove", chain: row.chain, token: row.token, address: row.address,
+        }),
+      });
+      await refreshWhale();
+    } catch (error) {
+      showState("whale", "error", apiErrorText(error));
+      button.disabled = false;
+    }
+  }));
+  return [
+    cell(row.chain),
+    addressCell(row.address),
+    cell(row.label || "—"),
+    cell(row.balance === null || row.balance === undefined ? "—" : amountText(row.balance)),
+    cell(percentText(row.min_delta_pct, 1)),
+    cell(row.checked_ms ? relativeTime(row.checked_ms) : "未检查"),
+    statusCell(row),
+    action,
+  ];
+}
+
+function renderWhaleWatchGroups(info, body) {
+  const groups = new Map();
+  for (const row of info.watches) {
+    const key = whaleGroupKey(row);
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(row);
+  }
+  const collapsed = collapsedGroups();
+  const wrap = make("div", "onchain-groups");
+  for (const name of [...groups.keys()].sort((a, b) => a.localeCompare(b))) {
+    const rows = groups.get(name);
+    const chains = [...new Set(rows.map((row) => row.chain))];
+    const failed = rows.filter((row) => row.error).length;
+    const isCollapsed = collapsed.has(name);
+
+    const block = make("div", "onchain-group");
+    const head = make("button", "onchain-group-head");
+    head.type = "button";
+    head.setAttribute("aria-expanded", String(!isCollapsed));
+    head.append(make("span", `onchain-caret${isCollapsed ? " collapsed" : ""}`, "▾"));
+    head.append(make("span", "onchain-group-name", name));
+    head.append(make("span", "onchain-group-meta", `${rows.length} 个地址 · ${chains.length} 条链`));
+    if (failed) head.append(make("span", "onchain-group-failed", `${failed} 个失败`));
+    block.append(head);
+
+    const inner = make("div", `onchain-group-body${isCollapsed ? " collapsed" : ""}`);
+    inner.append(table(
+      ["链", "地址", "备注", "余额", "告警阈值", "检查时间", "状态", ""],
+      rows.map(whaleWatchRow),
+    ));
+    block.append(inner);
+
+    head.addEventListener("click", () => {
+      const nowCollapsed = !collapsedGroups().has(name);
+      setGroupCollapsed(name, nowCollapsed);
+      inner.classList.toggle("collapsed", nowCollapsed);
+      head.setAttribute("aria-expanded", String(!nowCollapsed));
+      const caret = head.querySelector(".onchain-caret");
+      if (caret) caret.classList.toggle("collapsed", nowCollapsed);
+    });
+    wrap.append(block);
+  }
+  body.append(wrap);
+}
+
+function renderWhaleWatches(info, body) {
+  body.append(sectionTitle(`监控地址（${info.watches.length}）`));
+  if (info.watches.length) {
+    renderWhaleWatchGroups(info, body);
+  } else {
+    body.append(table(
+      ["代币", "链", "地址", "余额", "告警阈值", "检查时间", "状态", ""],
+      [],
+    ));
+  }
+  body.append(whaleAddForm(info));
+}
+
+function renderWhaleTokens(info, body) {
+  body.append(sectionTitle(`订阅代币（${info.tokens.length}）`));
+  if (!info.tokens.length) {
+    body.append(make("div", "process-empty", "还没有订阅。扫描后点“订阅该币筹码复扫”，即可定期跟踪筹码结构变化。"));
+    return;
+  }
+  const rows = info.tokens.map((row) => {
+    const action = make("td");
+    action.append(rowActionButton("取消订阅", "danger", async (event) => {
+      const button = event.currentTarget;
+      button.disabled = true;
+      try {
+        await request("/api/whale/token", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ action: "remove", chain: row.chain, token: row.token }),
+        });
+        await refreshWhale();
+      } catch (error) {
+        showState("whale", "error", error.message);
+        button.disabled = false;
+      }
+    }));
+    return [
+      cell(row.symbol || row.token),
+      cell(row.chain),
+      cell(row.top_pct === null || row.top_pct === undefined ? "—" : percentText(row.top_pct)),
+      cell(row.score === null || row.score === undefined ? "—" : `${Math.round(Number(row.score))}/100`),
+      cell(`${Number(row.interval_hours).toFixed(1).replace(/\.0$/, "")}h`),
+      cell(row.scanned_ms ? relativeTime(row.scanned_ms) : "未扫描"),
+      statusCell(row),
+      action,
+    ];
+  });
+  body.append(table(
+    ["代币", "链", "最大非基础设施", "评分", "复扫间隔", "上次扫描", "状态", ""],
+    rows,
+  ));
+}
+
+// ---------------------------------------------------------------- 外观设置
+
+const THEME_VARS = {
+  accent_color: "--accent",
+  up_color: "--green",
+  down_color: "--red",
+  bg_color: "--bg",
+  panel_color: "--panel",
+};
+
+function hexToRgba(hex, alpha) {
+  const match = /^#?([0-9a-fA-F]{6})$/.exec(String(hex || "").trim());
+  if (!match) return "";
+  const value = parseInt(match[1], 16);
+  return `rgba(${(value >> 16) & 255},${(value >> 8) & 255},${value & 255},${alpha})`;
+}
+
+function paintTheme(values) {
+  if (!values) return;
+  const root = document.documentElement;
+  for (const [key, cssVar] of Object.entries(THEME_VARS)) {
+    if (values[key]) root.style.setProperty(cssVar, values[key]);
+  }
+  const soft = hexToRgba(values.accent_color, 0.12);
+  if (soft) root.style.setProperty("--accent-soft", soft);
+  if (values.site_title) {
+    document.title = values.site_title;
+    if (els.brandText) els.brandText.textContent = values.site_title;
+  }
+  if (state.chart) {
+    state.chart.applyOptions({
+      layout: { background: { type: "solid", color: values.bg_color || "#181818" } },
+    });
+  }
+  if (state.candleSeries && values.up_color && values.down_color) {
+    state.candleSeries.applyOptions({
+      upColor: values.up_color,
+      downColor: values.down_color,
+      wickUpColor: values.up_color,
+      wickDownColor: values.down_color,
+    });
+  }
+}
+
+function applyTheme(values) {
+  paintTheme(values);
+  if (values) state.theme = values;
+}
+
+function draftTheme() {
+  const draft = { ...(state.theme || {}) };
+  for (const [key, node] of Object.entries(state.settingsInputs || {})) {
+    if (key === "proxy_url" || node.type === "checkbox") continue;
+    if (node.value) draft[key] = node.value.trim();
+  }
+  return draft;
+}
+
+function settingsField(label, control) {
+  const wrap = make("label", "settings-field");
+  wrap.append(make("span", "settings-label", label), control);
+  return wrap;
+}
+
+function renderSettings(data) {
+  state.settingsData = data;
+  const body = panel("settings").querySelector(".panel-body");
+  body.replaceChildren();
+  const values = data.values || {};
+  const inputs = {};
+
+  const textInput = (key, placeholder) => {
+    const input = make("input", "onchain-input settings-wide");
+    input.value = values[key] || "";
+    input.placeholder = placeholder || "";
+    input.autocomplete = "off";
+    input.spellcheck = false;
+    inputs[key] = input;
+    return input;
+  };
+
+  const colorInput = (key) => {
+    const row = make("div", "settings-color");
+    const picker = make("input", "settings-picker");
+    picker.type = "color";
+    picker.value = /^#[0-9a-fA-F]{6}$/.test(values[key] || "") ? values[key] : "#000000";
+    const text = make("input", "onchain-input settings-hex");
+    text.value = values[key] || "";
+    text.spellcheck = false;
+    picker.addEventListener("input", () => {
+      text.value = picker.value;
+      paintTheme(draftTheme());
+    });
+    text.addEventListener("input", () => {
+      const value = text.value.trim();
+      if (/^#[0-9a-fA-F]{6}$/.test(value)) {
+        picker.value = value;
+        paintTheme(draftTheme());
+      }
+    });
+    row.append(picker, text);
+    inputs[key] = text;
+    return row;
+  };
+
+  const selectInput = (key, options) => {
+    const select = make("select", "chart-select settings-wide");
+    for (const [value, label] of options) {
+      const option = make("option", "", label);
+      option.value = value;
+      select.append(option);
+    }
+    select.value = values[key] || options[0][0];
+    inputs[key] = select;
+    return select;
+  };
+
+  const previewAmount = (style) => {
+    const previous = state.theme;
+    state.theme = { ...(previous || {}), amount_format: style };
+    const text = formatAmount(123456789);
+    state.theme = previous;
+    return text;
+  };
+
+  const appearance = make("div", "settings-card");
+  appearance.append(make("div", "settings-title", "外观"));
+  const grid = make("div", "settings-grid");
+
+  const amountField = make("label", "settings-field");
+  amountField.append(make("span", "settings-label", "金额显示"));
+  const amountSelect = selectInput("amount_format", [
+    ["compact", "英文紧凑（1.23M / 4.56B）"],
+    ["cn", "中文单位（1234.56万 / 1.23亿）"],
+    ["full", "完整数字（1,234,567.89）"],
+  ]);
+  amountField.append(amountSelect);
+  const amountSample = make("div", "settings-hint", `预览：${previewAmount(amountSelect.value)}`);
+  amountSelect.addEventListener("change", () => {
+    amountSample.textContent = `预览：${previewAmount(amountSelect.value)}`;
+  });
+  amountField.append(amountSample);
+
+  grid.append(
+    settingsField("网站标题", textInput("site_title", "浏览器标签与左上角标题")),
+    amountField,
+    settingsField("上涨色（K线 / 盈利）", colorInput("up_color")),
+    settingsField("主题色", colorInput("accent_color")),
+    settingsField("下跌色（K线 / 亏损）", colorInput("down_color")),
+    settingsField("背景色", colorInput("bg_color")),
+    settingsField("面板色", colorInput("panel_color")),
+  );
+  appearance.append(grid);
+  appearance.append(make("div", "settings-hint", "改动会立即预览；界面是深色主题，建议保持低亮度配色。K 线涨跌色同时用于盈亏数字。"));
+  body.append(appearance);
+
+  const network = make("div", "settings-card");
+  network.append(make("div", "settings-title", "网络代理"));
+  const toggle = make("label", "settings-toggle");
+  const checkbox = make("input");
+  checkbox.type = "checkbox";
+  checkbox.checked = values.proxy_enabled === "1";
+  toggle.append(checkbox, make("span", "", "启用代理（REST 与链上请求）"));
+  network.append(toggle);
+
+  const proxyUrl = make("input", "onchain-input settings-wide");
+  proxyUrl.value = values.proxy_url || "";
+  proxyUrl.placeholder = "socks5://127.0.0.1:7890";
+  proxyUrl.disabled = !checkbox.checked;
+  proxyUrl.autocomplete = "off";
+  proxyUrl.spellcheck = false;
+  checkbox.addEventListener("change", () => {
+    proxyUrl.disabled = !checkbox.checked;
+  });
+  inputs.proxy_url = proxyUrl;
+  inputs.proxy_enabled = checkbox;
+  network.append(settingsField("代理地址", proxyUrl));
+  network.append(make("div", "settings-hint", "支持 socks5://、socks://、http:// 写法；留空表示直连。保存后立即对 REST 与链上请求生效，WebSocket 需要重启进程才会切换。"));
+  network.append(make("div", "settings-hint", `当前生效：${data.runtime?.effective_proxy || "直连"}`));
+  body.append(network);
+
+  state.settingsInputs = inputs;
+}
+
+function collectSettings() {
+  const values = {};
+  for (const [key, node] of Object.entries(state.settingsInputs || {})) {
+    values[key] = node.type === "checkbox" ? (node.checked ? "1" : "0") : node.value;
+  }
+  return values;
+}
+
+async function saveSettings(reset = false) {
+  const button = reset ? els.settingsReset : els.settingsSave;
+  const previous = state.theme;
+  button.disabled = true;
+  setStateLoading("settings");
+  try {
+    const data = await request("/api/settings", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(reset ? { reset: true } : { values: collectSettings() }),
+    });
+    clearState("settings");
+    renderSettings(data);
+    applyTheme(data.values);
+    setUpdatedAt(data.generated_at);
+    if (state.chart) loadView(true);
+  } catch (error) {
+    if (previous) paintTheme(previous);
+    showState("settings", "error", apiErrorText(error));
+  } finally {
+    button.disabled = false;
+  }
+}
+function renderWhale(data) {
+  if (data) state.whaleData = data;
+  const info = state.whaleData;
+  const body = panel("whale").querySelector(".panel-body");
+  body.replaceChildren();
+  if (!info) return;
+  if (!info.enabled) {
+    body.append(make("div", "state-empty", "链上筹码监控未启用：请在 config.toml 的 [whales] 里设置 enabled = true。"));
+    return;
+  }
+  syncWhaleChains(info.chains || []);
+  if (state.whaleScan) renderWhaleScan(state.whaleScan, body);
+  renderWhaleErrors(info, body);
+  renderWhaleWatches(info, body);
+  renderWhaleTokens(info, body);
+}
+
+async function refreshWhale() {
+  const data = await request("/api/whale");
+  state.whaleData = data;
+  clearState("whale");
+  renderWhale(data);
+  setUpdatedAt(data.generated_at);
+}
+
+async function runWhaleScan() {
+  const chain = els.whaleChain.value;
+  const token = els.whaleToken.value.trim();
+  if (!chain || !token) {
+    showState("whale", "error", "请选择链并填写代币合约（UTXO 链填 native）");
+    return;
+  }
+  state.whaleChain = chain;
+  localStorage.setItem("hl.whaleChain", chain);
+  els.whaleScan.disabled = true;
+  setStateLoading("whale");
+  try {
+    const data = await request(
+      `/api/whale/scan?chain=${encodeURIComponent(chain)}&token=${encodeURIComponent(token)}`,
+    );
+    state.whaleScan = data;
+    if (!state.whaleData) {
+      await refreshWhale();
+    } else {
+      clearState("whale");
+      renderWhale(null);
+    }
+    setUpdatedAt(data.generated_at);
+  } catch (error) {
+    showState("whale", "error", apiErrorText(error));
+  } finally {
+    els.whaleScan.disabled = false;
+  }
+}
+
+async function runWhaleCheck() {
+  els.whaleCheck.disabled = true;
+  setStateLoading("whale");
+  try {
+    const data = await request("/api/whale/check", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: "{}",
+    });
+    state.whaleData = data;
+    clearState("whale");
+    renderWhale(data);
+    setUpdatedAt(data.generated_at);
+  } catch (error) {
+    showState("whale", "error", apiErrorText(error));
+  } finally {
+    els.whaleCheck.disabled = false;
   }
 }
 function renderReport(data, body) {
@@ -988,6 +1762,14 @@ function renderReport(data, body) {
 function renderView(view, data) {
   if (view === "chart") {
     renderChart(data);
+    return;
+  }
+  if (view === "whale") {
+    renderWhale(data);
+    return;
+  }
+  if (view === "settings") {
+    renderSettings(data);
     return;
   }
   const body = panel(view).querySelector(".panel-body");
@@ -1015,6 +1797,8 @@ function endpoint(view) {
   if (view === "tpsl") return `/api/tpsl?address=${address}`;
   if (view === "history") return `/api/history?address=${address}`;
   if (view === "autohunt") return "/api/autohunt";
+  if (view === "whale") return "/api/whale";
+  if (view === "settings") return "/api/settings";
   return `/api/events?address=${address}&limit=100`;
 }
 
@@ -1037,7 +1821,7 @@ function setView(view) {
 async function loadView(force = false) {
   if (state.busy) return;
   const view = state.view;
-  if (!state.selected) {
+  if (view !== "whale" && view !== "settings" && !state.selected) {
     showState(view, "empty", "暂无账户");
     return;
   }
@@ -1053,7 +1837,7 @@ async function loadView(force = false) {
       setUpdatedAt(data.generated_at);
     }
   } catch (error) {
-    if (state.view === view) showState(view, "error", error.message);
+    if (state.view === view) showState(view, "error", apiErrorText(error));
   } finally {
     state.busy = false;
     els.refresh.disabled = false;
@@ -1069,6 +1853,7 @@ async function loadState() {
     state.selected = state.accounts[0].address;
   }
   if (state.selected) localStorage.setItem("hl.selected", state.selected);
+  if (payload.settings) applyTheme(payload.settings);
   els.network.textContent = payload.network || "";
   els.version.textContent = payload.version ? `v${payload.version}` : "";
   renderAccounts();
@@ -1231,6 +2016,19 @@ document.addEventListener("fullscreenchange", () => {
 });
 
 els.refresh.addEventListener("click", () => loadView(true));
+els.settingsSave.addEventListener("click", () => saveSettings(false));
+els.settingsReset.addEventListener("click", () => saveSettings(true));
+els.whaleScan.addEventListener("click", runWhaleScan);
+els.whaleCheck.addEventListener("click", runWhaleCheck);
+els.whaleChain.addEventListener("change", () => {
+  state.whaleChain = els.whaleChain.value;
+  localStorage.setItem("hl.whaleChain", state.whaleChain);
+});
+els.whaleToken.addEventListener("keydown", (event) => {
+  if (event.key !== "Enter") return;
+  event.preventDefault();
+  runWhaleScan();
+});
 els.sidebarToggle.addEventListener("click", () => els.sidebar.classList.toggle("open"));
 
 els.accountFormToggle.addEventListener("click", () => {

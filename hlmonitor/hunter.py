@@ -12,7 +12,7 @@ import time
 import urllib.parse
 import urllib.request
 
-from .format import fmt_usd_cn, short_addr
+from .format import fmt_usd_amount, short_addr
 from .net import build_opener
 
 STATS_BASE = "https://stats-data.hyperliquid.xyz/{network}/leaderboard"
@@ -35,7 +35,7 @@ def _fmt_pnl(value):
         return "-"
     num = _num(value)
     sign = "+" if num > 0 else ""
-    return f"{sign}{fmt_usd_cn(num)}"
+    return f"{sign}{fmt_usd_amount(num)}"
 
 
 def _window_perf(row, window="allTime"):
@@ -352,7 +352,7 @@ def format_hunt_results_html(results, title="大户扫描"):
             html.escape(line)
             for line in [
                 f"地址: {item['address']}",
-                f"净值: {fmt_usd_cn(item['account_value'])} · 全时段成交: {fmt_usd_cn(item['volume'])}",
+                f"净值: {fmt_usd_amount(item['account_value'])} · 全时段成交: {fmt_usd_amount(item['volume'])}",
                 f"盈亏: {_fmt_pnl(item['pnl'])} · ROI: {item['roi'] * 100:.2f}%",
                 f"胜率: {item['win_rate'] * 100:.1f}% · 加权胜率: {item['weighted_win_rate'] * 100:.1f}% · 盈亏因子: {pf_text}",
                 f"样本: {item['sample_size']} 笔平仓 · 评分: {item['score']:.3f}",
@@ -539,7 +539,7 @@ def format_account_card_html(account, index, total, spark_width=32, table_style=
         if spark:
             lines.append(spark)
 
-    equity = fmt_usd_cn(account.get("account_value", 0))
+    equity = fmt_usd_amount(account.get("account_value", 0))
     lev = account.get("avg_leverage")
     lev_text = f"{lev:.1f}x" if lev is not None else "-"
     wwr = _num(account.get("weighted_win_rate"))

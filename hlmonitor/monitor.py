@@ -26,7 +26,7 @@ from .format import (
     fmt_szi,
     fmt_time,
     fmt_usd,
-    fmt_usd_cn,
+    fmt_usd_amount,
     short_addr,
 )
 from .state import EventStore
@@ -229,7 +229,7 @@ class AddressMonitor:
                 [
                     html.escape(f"开仓: {fmt_time(info.get('open_time'))}"),
                     html.escape(f"平仓: {fmt_time(info.get('close_time'))}"),
-                    html.escape(f"峰值: {fmt_usd_cn(info.get('max_notional', 0))}"),
+                    html.escape(f"峰值: {fmt_usd_amount(info.get('max_notional', 0))}"),
                     "杠杆: -",
                 ]
             )
@@ -598,9 +598,9 @@ class AddressMonitor:
         self.store.save_snapshot(address, account_value, total_ntl_pos, withdrawable, now)
 
         print(
-            f"[snapshot] {short_addr(address)} 账户净值 {fmt_usd_cn(account_value)}, "
-            f"持仓名义 {fmt_usd_cn(total_ntl_pos)}, "
-            f"可提取 {fmt_usd_cn(withdrawable)}, "
+            f"[snapshot] {short_addr(address)} 账户净值 {fmt_usd_amount(account_value)}, "
+            f"持仓名义 {fmt_usd_amount(total_ntl_pos)}, "
+            f"可提取 {fmt_usd_amount(withdrawable)}, "
             f"现货币种 {len(spot_balances)}"
         )
 
@@ -615,8 +615,8 @@ class AddressMonitor:
                     address,
                     "account_change",
                     (
-                        f"[账户] 净值变化 {fmt_usd_cn(prev_av)} -> "
-                        f"{fmt_usd_cn(account_value)} "
+                        f"[账户] 净值变化 {fmt_usd_amount(prev_av)} -> "
+                        f"{fmt_usd_amount(account_value)} "
                         f"({(account_value - prev_av):+,.2f}, {change_pct:.2f}%)"
                     ),
                     {
@@ -846,7 +846,7 @@ class AddressMonitor:
         for coin, pos in current.items():
             if coin not in previous:
                 changes[coin] = (
-                    f"开仓 {fmt_usd_cn(abs(_num(pos.get('notional'))))}"
+                    f"开仓 {fmt_usd_amount(abs(_num(pos.get('notional'))))}"
                 )
                 continue
             prev = previous[coin]
@@ -858,9 +858,9 @@ class AddressMonitor:
             delta_notional = cur_notional - prev_notional
             if abs(delta_szi) > 1e-9:
                 if abs(cur_szi) > abs(prev_szi):
-                    changes[coin] = f"加仓 {fmt_usd_cn(abs(delta_notional))}"
+                    changes[coin] = f"加仓 {fmt_usd_amount(abs(delta_notional))}"
                 else:
-                    changes[coin] = f"减仓 {fmt_usd_cn(abs(delta_notional))}"
+                    changes[coin] = f"减仓 {fmt_usd_amount(abs(delta_notional))}"
             elif abs(delta_notional) >= self.config.rules.position_delta_min_usd:
                 notional_changed = True
 
@@ -872,7 +872,7 @@ class AddressMonitor:
                 closed_positions.append(
                     (
                         coin,
-                        f"平{side_cn}仓 {fmt_usd_cn(abs(_num(prev.get('notional'))))}",
+                        f"平{side_cn}仓 {fmt_usd_amount(abs(_num(prev.get('notional'))))}",
                     )
                 )
 
@@ -982,7 +982,7 @@ class AddressMonitor:
         notional = abs(_num(size) * _num(price))
         text = (
             f"[成交] {display_coin} {side} {size} @ {price}，"
-            f"{direction}，成交额约 {fmt_usd_cn(notional)}"
+            f"{direction}，成交额约 {fmt_usd_amount(notional)}"
         )
         self._emit(
             address,
@@ -1038,7 +1038,7 @@ class AddressMonitor:
                 address,
                 "funding",
                 (
-                    f"[资金费] {coin} {fmt_usd_cn(event.get('usdc', 0))} USDC，"
+                    f"[资金费] {coin} {fmt_usd_amount(event.get('usdc', 0))} USDC，"
                     f"持仓 {fmt_szi(event.get('szi', '0'))}，"
                     f"费率 {event.get('fundingRate', '-')}"
                 ),
@@ -1099,20 +1099,20 @@ class AddressMonitor:
             return f"[资金流] {delta}"
         kind = delta.get("type", "update")
         if kind == "deposit":
-            return f"[资金流] 充值 {fmt_usd_cn(delta.get('usdc', 0))} USDC"
+            return f"[资金流] 充值 {fmt_usd_amount(delta.get('usdc', 0))} USDC"
         if kind == "withdraw":
             return (
-                f"[资金流] 提现 {fmt_usd_cn(delta.get('usdc', 0))} USDC"
-                f"（手续费 {fmt_usd_cn(delta.get('fee', 0))}）"
+                f"[资金流] 提现 {fmt_usd_amount(delta.get('usdc', 0))} USDC"
+                f"（手续费 {fmt_usd_amount(delta.get('fee', 0))}）"
             )
         if kind == "internalTransfer":
             return (
-                f"[资金流] 内部转账 {fmt_usd_cn(delta.get('usdc', 0))} USDC -> "
+                f"[资金流] 内部转账 {fmt_usd_amount(delta.get('usdc', 0))} USDC -> "
                 f"{delta.get('destination', '-')}"
             )
         if kind == "subAccountTransfer":
             return (
-                f"[资金流] 子账户转账 {fmt_usd_cn(delta.get('usdc', 0))} USDC -> "
+                f"[资金流] 子账户转账 {fmt_usd_amount(delta.get('usdc', 0))} USDC -> "
                 f"{delta.get('destination', '-')}"
             )
         if kind == "liquidation":
@@ -1121,7 +1121,7 @@ class AddressMonitor:
                 for p in (delta.get("liquidatedPositions") or [])
             )
             return (
-                f"[资金流] 清算，账户价值 {fmt_usd_cn(delta.get('accountValue', 0))}，"
+                f"[资金流] 清算，账户价值 {fmt_usd_amount(delta.get('accountValue', 0))}，"
                 f"清算持仓: {positions or '-'}"
             )
         if kind == "spotTransfer":
@@ -1133,22 +1133,22 @@ class AddressMonitor:
             return (
                 f"[资金流] 发送 {delta.get('amount', '0')} "
                 f"{delta.get('token', '?')} -> {delta.get('destination', '-')}"
-                f"（约 {fmt_usd_cn(delta.get('usdcValue', 0))}）"
+                f"（约 {fmt_usd_amount(delta.get('usdcValue', 0))}）"
             )
         if kind == "vaultDeposit":
-            return f"[资金流] 存入金库 {fmt_usd_cn(delta.get('usdc', 0))} USDC"
+            return f"[资金流] 存入金库 {fmt_usd_amount(delta.get('usdc', 0))} USDC"
         if kind == "vaultWithdraw":
             return (
-                f"[资金流] 金库提现 {fmt_usd_cn(delta.get('netWithdrawnUsd', 0))} USDC，"
-                f"请求 {fmt_usd_cn(delta.get('requestedUsd', 0))}"
+                f"[资金流] 金库提现 {fmt_usd_amount(delta.get('netWithdrawnUsd', 0))} USDC，"
+                f"请求 {fmt_usd_amount(delta.get('requestedUsd', 0))}"
             )
         if kind == "accountClassTransfer":
             direction = "现货转合约" if delta.get("toPerp") else "合约转现货"
-            return f"[资金流] 账户类型划转 {fmt_usd_cn(delta.get('usdc', 0))} USDC（{direction}）"
+            return f"[资金流] 账户类型划转 {fmt_usd_amount(delta.get('usdc', 0))} USDC（{direction}）"
         if kind == "spotGenesis":
             return f"[资金流] 现货生成 {delta.get('amount', '0')} {delta.get('token', '?')}"
         if kind == "rewardsClaim":
-            return f"[资金流] 领取奖励 {fmt_usd_cn(delta.get('amount', 0))}"
+            return f"[资金流] 领取奖励 {fmt_usd_amount(delta.get('amount', 0))}"
         return f"[资金流] {kind}: {json.dumps(delta, ensure_ascii=False)}"
 
     def _emit(self, address, kind, text, data, key=None, ts=None):

@@ -36,8 +36,26 @@ def fmt_usd(x, decimals=2):
         return str(x)
 
 
+# 金额显示风格：cn=万/千万/亿，compact=K/M/B，full=完整数字。
+AMOUNT_STYLES = ("cn", "compact", "full")
+DEFAULT_AMOUNT_STYLE = "cn"
+_amount_style = DEFAULT_AMOUNT_STYLE
+
+
+def set_amount_style(style):
+    """设置全局金额风格（Web 设置会调用；其余进程保持默认）。"""
+    global _amount_style
+    text = str(style or "").strip().lower()
+    _amount_style = text if text in AMOUNT_STYLES else DEFAULT_AMOUNT_STYLE
+    return _amount_style
+
+
+def get_amount_style():
+    return _amount_style
+
+
 def fmt_usd_cn(x, decimals=2):
-    """把 USD 金额压缩成 万/千万/亿 这类中文单位。"""
+    """把 USD 金额压缩成 万/千万/百万/亿 这类中文单位。"""
     try:
         value = float(x)
     except (TypeError, ValueError):
@@ -49,9 +67,48 @@ def fmt_usd_cn(x, decimals=2):
         return f"{sign}${magnitude / 100_000_000:,.{decimals}f}亿"
     if magnitude >= 10_000_000:
         return f"{sign}${magnitude / 10_000_000:,.{decimals}f}千万"
+    if magnitude >= 1_000_000:
+        return f"{sign}${magnitude / 1_000_000:,.{decimals}f}百万"
     if magnitude >= 10_000:
         return f"{sign}${magnitude / 10_000:,.{decimals}f}万"
     return f"{sign}${magnitude:,.{decimals}f}"
+
+
+def fmt_usd_compact(x, decimals=2):
+    """英文紧凑写法：K / M / B。"""
+    try:
+        value = float(x)
+    except (TypeError, ValueError):
+        return str(x)
+
+    sign = "-" if value < 0 else ""
+    magnitude = abs(value)
+    if magnitude >= 1_000_000_000:
+        return f"{sign}${magnitude / 1_000_000_000:,.{decimals}f}B"
+    if magnitude >= 1_000_000:
+        return f"{sign}${magnitude / 1_000_000:,.{decimals}f}M"
+    if magnitude >= 1_000:
+        return f"{sign}${magnitude / 1_000:,.{decimals}f}K"
+    return f"{sign}${magnitude:,.{decimals}f}"
+
+
+def fmt_usd_full(x, decimals=2):
+    """完整数字，例如 $12,345,678.90。"""
+    try:
+        value = float(x)
+    except (TypeError, ValueError):
+        return str(x)
+    sign = "-" if value < 0 else ""
+    return f"{sign}${abs(value):,.{decimals}f}"
+
+
+def fmt_usd_amount(x, decimals=2):
+    """按当前金额风格格式化；所有对外展示金额都应走这里。"""
+    if _amount_style == "compact":
+        return fmt_usd_compact(x, decimals)
+    if _amount_style == "full":
+        return fmt_usd_full(x, decimals)
+    return fmt_usd_cn(x, decimals)
 
 
 def fmt_qty(x, decimals=2):

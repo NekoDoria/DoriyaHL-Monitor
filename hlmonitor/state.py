@@ -101,6 +101,64 @@ CREATE TABLE IF NOT EXISTS auto_scanned (
     scanned_at  INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (chat_id, proc, address)
 );
+CREATE TABLE IF NOT EXISTS whale_watches (
+    chat_id         TEXT NOT NULL,
+    chain           TEXT NOT NULL,
+    token           TEXT NOT NULL,
+    address         TEXT NOT NULL,
+    symbol          TEXT NOT NULL DEFAULT '',
+    label           TEXT NOT NULL DEFAULT '',
+    decimals        INTEGER,
+    last_balance    REAL,
+    last_checked_ms INTEGER NOT NULL DEFAULT 0,
+    last_error      TEXT NOT NULL DEFAULT '',
+    interval_s      REAL NOT NULL DEFAULT 300,
+    min_delta_pct   REAL NOT NULL DEFAULT 2,
+    min_delta_abs   REAL NOT NULL DEFAULT 0,
+    enabled         INTEGER NOT NULL DEFAULT 1,
+    created_ms      INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (chat_id, chain, token, address)
+);
+CREATE TABLE IF NOT EXISTS whale_tokens (
+    chat_id          TEXT NOT NULL,
+    chain            TEXT NOT NULL,
+    token            TEXT NOT NULL,
+    symbol           TEXT NOT NULL DEFAULT '',
+    label            TEXT NOT NULL DEFAULT '',
+    last_top_address TEXT NOT NULL DEFAULT '',
+    last_top_pct     REAL,
+    last_score       REAL,
+    last_scan_ms     INTEGER NOT NULL DEFAULT 0,
+    last_error       TEXT NOT NULL DEFAULT '',
+    interval_s       REAL NOT NULL DEFAULT 21600,
+    enabled          INTEGER NOT NULL DEFAULT 1,
+    created_ms       INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (chat_id, chain, token)
+);
+CREATE TABLE IF NOT EXISTS whale_scans (
+    chain      TEXT NOT NULL,
+    token      TEXT NOT NULL,
+    payload    TEXT NOT NULL,
+    scanned_ms INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (chain, token)
+);
+CREATE TABLE IF NOT EXISTS whale_scan_history (
+    chain         TEXT NOT NULL,
+    token         TEXT NOT NULL,
+    scanned_ms    INTEGER NOT NULL,
+    whale_address TEXT NOT NULL DEFAULT '',
+    whale_pct     REAL,
+    top10_pct     REAL,
+    score         REAL,
+    PRIMARY KEY (chain, token, scanned_ms)
+);
+CREATE TABLE IF NOT EXISTS app_settings (
+    key        TEXT PRIMARY KEY,
+    value      TEXT NOT NULL,
+    updated_ms INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_whale_watches_chat ON whale_watches(chat_id);
+CREATE INDEX IF NOT EXISTS idx_whale_tokens_chat ON whale_tokens(chat_id);
 CREATE INDEX IF NOT EXISTS idx_events_ts ON events(ts);
 CREATE INDEX IF NOT EXISTS idx_snapshots_addr_ts ON snapshots(address, ts);
 """
@@ -597,6 +655,370 @@ class EventStore:
                 )
             self.conn.commit()
 
+    # ------------------------------------------------------------ 应用设置
+
+    def get_app_settings(self):
+        """读取全部应用级设置（与聊天无关）。"""
+        with self._lock:
+            rows = self.conn.execute(
+                "SELECT key, value FROM app_settings"
+            ).fetchall()
+        return {str(key): str(value) for key, value in rows}
+
+    def set_app_settings(self, values, ts=None):
+        """写入设置；value 为 None 表示删除该项，回落到默认值。"""
+        now_ms = int(ts or 0)
+        upserts = []
+        deletes = []
+        for key, value in (values or {}).items():
+            if value is None:
+                deletes.append((str(key),))
+            else:
+                upserts.append((str(key), str(value), now_ms))
+        with self._lock:
+            if upserts:
+                self.conn.executemany(
+                    "INSERT INTO app_settings(key, value, updated_ms) VALUES (?,?,?)"
+                    " ON CONFLICT(key) DO UPDATE SET"
+                    " value = excluded.value, updated_ms = excluded.updated_ms",
+                    upserts,
+                )
+            if deletes:
+                self.conn.executemany(
+                    "DELETE FROM app_settings WHERE key = ?", deletes
+                )
+            self.conn.commit()
+    # ---------------------------------------------------------------- 链上大户
+
+    WHALE_WATCH_COLUMNS = (
+        "chat_id, chain, token, address, symbol, label, decimals, last_balance,"
+        " last_checked_ms, last_error, interval_s, min_delta_pct, min_delta_abs,"
+        " enabled, created_ms"
+    )
+
+    WHALE_TOKEN_COLUMNS = (
+        "chat_id, chain, token, symbol, label, last_top_address, last_top_pct,"
+        " last_score, last_scan_ms, last_error, interval_s, enabled, created_ms"
+    )
+
+    @staticmethod
+    def _whale_watch_row(row):
+        return {
+            "chat_id": str(row[0]),
+            "chain": str(row[1]),
+            "token": str(row[2]),
+            "address": str(row[3]),
+            "symbol": str(row[4] or ""),
+            "label": str(row[5] or ""),
+            "decimals": row[6],
+            "last_balance": row[7],
+            "last_checked_ms": int(row[8] or 0),
+            "last_error": str(row[9] or ""),
+            "interval_s": float(row[10] or 300.0),
+            "min_delta_pct": float(row[11] or 0.0),
+            "min_delta_abs": float(row[12] or 0.0),
+            "enabled": bool(row[13]),
+            "created_ms": int(row[14] or 0),
+        }
+
+    @staticmethod
+    def _whale_token_row(row):
+        return {
+            "chat_id": str(row[0]),
+            "chain": str(row[1]),
+            "token": str(row[2]),
+            "symbol": str(row[3] or ""),
+            "label": str(row[4] or ""),
+            "last_top_address": str(row[5] or ""),
+            "last_top_pct": row[6],
+            "last_score": row[7],
+            "last_scan_ms": int(row[8] or 0),
+            "last_error": str(row[9] or ""),
+            "interval_s": float(row[10] or 21600.0),
+            "enabled": bool(row[11]),
+            "created_ms": int(row[12] or 0),
+        }
+
+    def upsert_whale_watch(self, chat_id, entry, ts=None):
+        """新增或更新一个监控地址；重复添加不会清掉已记录的余额基线。"""
+        now_ms = int(ts or 0)
+        with self._lock:
+            self.conn.execute(
+                "INSERT INTO whale_watches("
+                " chat_id, chain, token, address, symbol, label, decimals,"
+                " interval_s, min_delta_pct, min_delta_abs, enabled, created_ms,"
+                " last_checked_ms, last_error)"
+                " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,0,'')"
+                " ON CONFLICT(chat_id, chain, token, address) DO UPDATE SET"
+                " symbol = excluded.symbol,"
+                " label = excluded.label,"
+                " decimals = excluded.decimals,"
+                " interval_s = excluded.interval_s,"
+                " min_delta_pct = excluded.min_delta_pct,"
+                " min_delta_abs = excluded.min_delta_abs,"
+                " enabled = excluded.enabled",
+                (
+                    str(chat_id),
+                    str(entry.get("chain") or "").lower(),
+                    str(entry.get("token") or ""),
+                    str(entry.get("address") or ""),
+                    str(entry.get("symbol") or ""),
+                    str(entry.get("label") or ""),
+                    int(entry["decimals"]) if entry.get("decimals") is not None else None,
+                    float(entry.get("interval_s") or 300.0),
+                    float(entry.get("min_delta_pct") or 0.0),
+                    float(entry.get("min_delta_abs") or 0.0),
+                    1 if entry.get("enabled", True) else 0,
+                    now_ms,
+                ),
+            )
+            self.conn.commit()
+
+    def remove_whale_watch(self, chat_id, chain, token, address):
+        with self._lock:
+            cur = self.conn.execute(
+                "DELETE FROM whale_watches WHERE chat_id = ? AND chain = ?"
+                " AND token = ? AND address = ?",
+                (str(chat_id), str(chain), str(token), str(address)),
+            )
+            self.conn.commit()
+        return cur.rowcount > 0
+
+    def get_whale_watches(self, chat_id=None, enabled_only=True):
+        query = f"SELECT {self.WHALE_WATCH_COLUMNS} FROM whale_watches"
+        clauses = []
+        params = []
+        if chat_id is not None:
+            clauses.append("chat_id = ?")
+            params.append(str(chat_id))
+        if enabled_only:
+            clauses.append("enabled = 1")
+        if clauses:
+            query += " WHERE " + " AND ".join(clauses)
+        query += " ORDER BY created_ms DESC, address ASC"
+        with self._lock:
+            rows = self.conn.execute(query, params).fetchall()
+        return [self._whale_watch_row(row) for row in rows]
+
+    def due_whale_watches(self, now_ms, force=False, chat_id=None):
+        query = f"SELECT {self.WHALE_WATCH_COLUMNS} FROM whale_watches WHERE enabled = 1"
+        params = []
+        if not force:
+            query += " AND (last_checked_ms + CAST(interval_s * 1000 AS INTEGER)) <= ?"
+            params.append(int(now_ms))
+        if chat_id is not None:
+            query += " AND chat_id = ?"
+            params.append(str(chat_id))
+        query += " ORDER BY last_checked_ms ASC"
+        with self._lock:
+            rows = self.conn.execute(query, params).fetchall()
+        return [self._whale_watch_row(row) for row in rows]
+
+    def mark_whale_watch(
+        self, chat_id, chain, token, address, checked_ms, balance=None, error=""
+    ):
+        with self._lock:
+            if balance is None:
+                self.conn.execute(
+                    "UPDATE whale_watches SET last_checked_ms = ?, last_error = ?"
+                    " WHERE chat_id = ? AND chain = ? AND token = ? AND address = ?",
+                    (
+                        int(checked_ms or 0),
+                        str(error or ""),
+                        str(chat_id),
+                        str(chain),
+                        str(token),
+                        str(address),
+                    ),
+                )
+            else:
+                self.conn.execute(
+                    "UPDATE whale_watches SET last_checked_ms = ?, last_error = ?,"
+                    " last_balance = ? WHERE chat_id = ? AND chain = ?"
+                    " AND token = ? AND address = ?",
+                    (
+                        int(checked_ms or 0),
+                        str(error or ""),
+                        float(balance),
+                        str(chat_id),
+                        str(chain),
+                        str(token),
+                        str(address),
+                    ),
+                )
+            self.conn.commit()
+
+    def upsert_whale_token(self, chat_id, entry, ts=None):
+        now_ms = int(ts or 0)
+        with self._lock:
+            self.conn.execute(
+                "INSERT INTO whale_tokens("
+                " chat_id, chain, token, symbol, label, interval_s, enabled,"
+                " created_ms, last_scan_ms, last_error)"
+                " VALUES (?,?,?,?,?,?,?,?,0,'')"
+                " ON CONFLICT(chat_id, chain, token) DO UPDATE SET"
+                " symbol = excluded.symbol,"
+                " label = excluded.label,"
+                " interval_s = excluded.interval_s,"
+                " enabled = excluded.enabled",
+                (
+                    str(chat_id),
+                    str(entry.get("chain") or "").lower(),
+                    str(entry.get("token") or ""),
+                    str(entry.get("symbol") or ""),
+                    str(entry.get("label") or ""),
+                    float(entry.get("interval_s") or 21600.0),
+                    1 if entry.get("enabled", True) else 0,
+                    now_ms,
+                ),
+            )
+            self.conn.commit()
+
+    def remove_whale_token(self, chat_id, chain, token):
+        with self._lock:
+            cur = self.conn.execute(
+                "DELETE FROM whale_tokens WHERE chat_id = ? AND chain = ? AND token = ?",
+                (str(chat_id), str(chain), str(token)),
+            )
+            self.conn.commit()
+        return cur.rowcount > 0
+
+    def get_whale_tokens(self, chat_id=None, enabled_only=True):
+        query = f"SELECT {self.WHALE_TOKEN_COLUMNS} FROM whale_tokens"
+        clauses = []
+        params = []
+        if chat_id is not None:
+            clauses.append("chat_id = ?")
+            params.append(str(chat_id))
+        if enabled_only:
+            clauses.append("enabled = 1")
+        if clauses:
+            query += " WHERE " + " AND ".join(clauses)
+        query += " ORDER BY created_ms DESC, token ASC"
+        with self._lock:
+            rows = self.conn.execute(query, params).fetchall()
+        return [self._whale_token_row(row) for row in rows]
+
+    def due_whale_tokens(self, now_ms, force=False, chat_id=None):
+        query = f"SELECT {self.WHALE_TOKEN_COLUMNS} FROM whale_tokens WHERE enabled = 1"
+        params = []
+        if not force:
+            query += " AND (last_scan_ms + CAST(interval_s * 1000 AS INTEGER)) <= ?"
+            params.append(int(now_ms))
+        if chat_id is not None:
+            query += " AND chat_id = ?"
+            params.append(str(chat_id))
+        query += " ORDER BY last_scan_ms ASC"
+        with self._lock:
+            rows = self.conn.execute(query, params).fetchall()
+        return [self._whale_token_row(row) for row in rows]
+
+    def mark_whale_token(
+        self,
+        chat_id,
+        chain,
+        token,
+        scanned_ms,
+        top_address=None,
+        top_pct=None,
+        score=None,
+        error="",
+    ):
+        with self._lock:
+            if top_address is None:
+                self.conn.execute(
+                    "UPDATE whale_tokens SET last_scan_ms = ?, last_error = ?"
+                    " WHERE chat_id = ? AND chain = ? AND token = ?",
+                    (
+                        int(scanned_ms or 0),
+                        str(error or ""),
+                        str(chat_id),
+                        str(chain),
+                        str(token),
+                    ),
+                )
+            else:
+                self.conn.execute(
+                    "UPDATE whale_tokens SET last_scan_ms = ?, last_error = ?,"
+                    " last_top_address = ?, last_top_pct = ?, last_score = ?"
+                    " WHERE chat_id = ? AND chain = ? AND token = ?",
+                    (
+                        int(scanned_ms or 0),
+                        str(error or ""),
+                        str(top_address),
+                        float(top_pct or 0.0),
+                        float(score or 0.0),
+                        str(chat_id),
+                        str(chain),
+                        str(token),
+                    ),
+                )
+            self.conn.commit()
+
+    def save_whale_scan(self, report, ts=None):
+        payload = json.dumps(report.to_dict(), ensure_ascii=False)
+        with self._lock:
+            self.conn.execute(
+                "INSERT OR REPLACE INTO whale_scans(chain, token, payload, scanned_ms)"
+                " VALUES (?,?,?,?)",
+                (
+                    str(report.chain),
+                    str(report.token),
+                    payload,
+                    int(ts or report.scanned_ms or 0),
+                ),
+            )
+            self.conn.commit()
+
+    def get_whale_scan(self, chain, token):
+        with self._lock:
+            row = self.conn.execute(
+                "SELECT payload FROM whale_scans WHERE chain = ? AND token = ?",
+                (str(chain), str(token)),
+            ).fetchone()
+        if row is None:
+            return None
+        try:
+            return json.loads(row[0])
+        except ValueError:
+            return None
+
+    def record_whale_history(self, report, ts=None):
+        with self._lock:
+            self.conn.execute(
+                "INSERT OR REPLACE INTO whale_scan_history("
+                " chain, token, scanned_ms, whale_address, whale_pct, top10_pct, score)"
+                " VALUES (?,?,?,?,?,?,?)",
+                (
+                    str(report.chain),
+                    str(report.token),
+                    int(ts or report.scanned_ms or 0),
+                    str(report.whale_address or ""),
+                    float(report.whale_pct or 0.0),
+                    float(report.top10_pct or 0.0),
+                    float(report.score or 0.0),
+                ),
+            )
+            self.conn.commit()
+
+    def get_whale_history(self, chain, token, limit=10):
+        with self._lock:
+            rows = self.conn.execute(
+                "SELECT scanned_ms, whale_address, whale_pct, top10_pct, score"
+                " FROM whale_scan_history WHERE chain = ? AND token = ?"
+                " ORDER BY scanned_ms DESC LIMIT ?",
+                (str(chain), str(token), int(limit)),
+            ).fetchall()
+        return [
+            {
+                "scanned_ms": int(row[0] or 0),
+                "whale_address": str(row[1] or ""),
+                "whale_pct": row[2],
+                "top10_pct": row[3],
+                "score": row[4],
+            }
+            for row in rows
+        ]
     def close(self):
         with self._lock:
             self.conn.close()
