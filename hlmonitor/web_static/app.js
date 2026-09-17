@@ -22,6 +22,7 @@ const state = {
   volumeSeries: null,
   priceLines: [],
   zoneRects: [],
+  zonePopupRow: null,
   overlayFrame: null,
 };
 
@@ -474,6 +475,7 @@ function hideZoneTooltip() {
 function hideZonePopup() {
   els.zonePopup.hidden = true;
   els.zonePopup.replaceChildren();
+  state.zonePopupRow = null;
 }
 
 function clearOrderZoneOverlays() {
@@ -548,6 +550,8 @@ function updateOrderZoneOverlays() {
     item.node.style.height = `${height}px`;
     item.node.style.width = `${geometry.width}px`;
     if (item.label) item.label.hidden = true;
+    item.top = rectTop;
+    item.height = height;
     placed.push({ item, top: rectTop, height });
   }
 
@@ -700,6 +704,16 @@ function renderZonePopup(row, event) {
     positionDetailRow("总数量", qty.format(row.total_sz)),
     positionDetailRow("总金额", formatAmount(row.total_value)),
   );
+  const overlaps = zoneOverlapsAt(zonePointerY(event));
+  if (overlaps.length > 1) {
+    details.append(
+      make(
+        "div",
+        "position-hint",
+        `此处叠着 ${overlaps.length} 个区间，按住 Alt 点击可切换到下一个`,
+      ),
+    );
+  }
   popup.replaceChildren(title, details);
   popup.hidden = false;
   popup.style.left = "12px";
@@ -719,6 +733,26 @@ function renderZonePopup(row, event) {
   makeChartPopupDraggable(popup, title);
 }
 
+function zonePointerY(event) {
+  if (Number.isFinite(event.offsetY)) return event.offsetY;
+  const rect = els.chartContainer.getBoundingClientRect();
+  return event.clientY - rect.top;
+}
+
+// 同一纵向位置上可能叠着好几个区间（都是全宽横条），
+// 按高度升序返回，越小的越具体，排前面。
+function zoneOverlapsAt(y) {
+  const hits = [];
+  for (const item of state.zoneRects) {
+    if (!item.node || item.node.hidden) continue;
+    if (!Number.isFinite(item.top) || !Number.isFinite(item.height)) continue;
+    if (y < item.top || y > item.top + item.height) continue;
+    hits.push(item);
+  }
+  hits.sort((a, b) => a.height - b.height);
+  return hits;
+}
+
 function addZoneRect(row, className) {
   const node = make("div", className);
   node.dataset.zoneIndex = String(state.zoneRects.length);
@@ -727,7 +761,22 @@ function addZoneRect(row, className) {
   node.addEventListener("mouseleave", hideZoneTooltip);
   node.addEventListener("click", (event) => {
     event.stopPropagation();
-    renderZonePopup(row, event);
+    let target = row;
+    // 被更大的区间压住时，按住 Alt 点击逐个切换这里重叠的区间。
+    // 起点取“当前正在看的那个”，这样连按可以一直循环下去。
+    if (event.altKey) {
+      const hits = zoneOverlapsAt(zonePointerY(event));
+      if (hits.length > 1) {
+        const from = hits.some((item) => item.row === state.zonePopupRow)
+          ? state.zonePopupRow
+          : row;
+        const current = hits.findIndex((item) => item.row === from);
+        const next = hits[(current + 1 + hits.length) % hits.length];
+        if (next) target = next.row;
+      }
+    }
+    state.zonePopupRow = target;
+    renderZonePopup(target, event);
   });
   els.zoneLayer.append(node);
   const label = make("span", "zone-label", zoneDirectionLabel(row));
@@ -878,10 +927,19 @@ function drawChartOverlays(data) {
   const visibleOrders = state.overlays.orders ? data.order_zones.slice(0, 12) : [];
   const visibleFills = state.overlays.fills ? data.fill_zones.slice(0, 12) : [];
   const visibleTpsl = state.overlays.tpsl ? data.tpsl_lines.slice(0, 12) : [];
-  visibleOrders.forEach((row) => addZoneRect(row, `zone-rect order-zone ${row.side_raw === "B" ? "long" : "short"}`));
-  visibleFills.forEach((row) => addZoneRect(row, `zone-rect fill-zone ${row.side_raw === "B" ? "long" : "short"}`));
   const visibleWhale = state.overlays.whale ? (data.whale_zones || []).slice(0, 20) : [];
-  visibleWhale.forEach((row) => addZoneRect(row, `zone-rect whale-zone ${row.side_raw === "B" ? "long" : "short"}`));
+  // 区间都是全宽横条，先挂大区间、后挂小区间，
+  // 这样价格跨度小的叠在上层，鼠标才点得到。
+  const zoneSpans = (row) => Math.abs(Number(row.max_px) - Number(row.min_px)) || 0;
+  const zoneRows = [
+    ...visibleOrders.map((row) => [row, "order"]),
+    ...visibleFills.map((row) => [row, "fill"]),
+    ...visibleWhale.map((row) => [row, "whale"]),
+  ].sort((a, b) => zoneSpans(b[0]) - zoneSpans(a[0]));
+  for (const [row, kind] of zoneRows) {
+    const side = row.side_raw === "B" ? "long" : "short";
+    addZoneRect(row, `zone-rect ${kind}-zone ${side}`);
+  }
 
   for (const row of visibleTpsl) {
     const color = row.label === "止盈" ? "#7c9cff" : "#ffb86b";

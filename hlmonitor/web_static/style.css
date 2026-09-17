@@ -539,3 +539,9 @@ button:focus-visible, input:focus-visible { outline: 2px solid var(--accent); ou
 }
 .fill-window-select { width: 100%; min-width: 0; }
 .fill-window-control .merge-scale { justify-content: flex-start; }
+/* 图表：重叠区间提示 */
+.position-hint {
+  margin-top: 8px; padding: 6px 8px; border-radius: 7px;
+  color: var(--muted); background: rgba(255,255,255,.05); font-size: 11px; line-height: 1.5;
+}
+.zone-rect:hover { z-index: 3; }
