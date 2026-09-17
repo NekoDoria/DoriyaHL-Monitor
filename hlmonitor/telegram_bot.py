@@ -38,7 +38,7 @@ from .format import (
 from .hunter import _build_coin_dex_map, attach_charts, format_account_card_html, scan
 from .monitor import AddressMonitor
 from .net import build_opener
-from .state import EventStore
+from .state import WEB_CHAT_ID, EventStore
 from .whale import (
     DEFAULT_EXCLUDE_LABEL_KEYWORDS,
     DEFAULT_EXCLUDE_TAGS,
@@ -4221,7 +4221,8 @@ class TelegramBot:
 
     def _dispatch_whale_alerts(self, alerts):
         for alert in alerts or []:
-            if not alert.chat_id:
+            # __web__ 是网页面板的虚拟 chat_id，不是真的 Telegram 会话。
+            if not alert.chat_id or alert.chat_id == WEB_CHAT_ID:
                 continue
             try:
                 self.client.send_message(

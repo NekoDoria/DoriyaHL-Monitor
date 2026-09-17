@@ -210,6 +210,22 @@ function renderContext() {
   els.currentAddress.textContent = account ? account.address : "—";
 }
 
+// 仪表盘展示的是所有来源的账户并集，标出来源避免误会。
+const ACCOUNT_SOURCE_BADGES = {
+  telegram: {
+    label: "TG",
+    hint: (account) => `来自 Telegram（${account.chat_count || 1} 个聊天），移除会同时取消那边的订阅`,
+  },
+  both: {
+    label: "TG+Web",
+    hint: (account) => `网页和 Telegram（${account.chat_count || 2} 个聊天）都订阅了，移除会一并取消`,
+  },
+  web: {
+    label: "Web",
+    hint: () => "在网页面板添加",
+  },
+};
+
 function renderAccounts() {
   els.accountList.replaceChildren();
   if (!state.accounts.length) {
@@ -221,7 +237,14 @@ function renderAccounts() {
     item.setAttribute("role", "button");
     item.setAttribute("tabindex", "0");
     const text = make("div", "account-text");
-    text.append(make("div", "account-name", accountLabel(account)));
+    const name = make("div", "account-name", accountLabel(account));
+    const sourceBadge = ACCOUNT_SOURCE_BADGES[account.source];
+    if (sourceBadge) {
+      const badge = make("span", `account-source ${account.source}`, sourceBadge.label);
+      badge.title = sourceBadge.hint(account);
+      name.append(badge);
+    }
+    text.append(name);
     text.append(make("div", "account-address", shortAddress(account.address)));
     item.append(
       make("span", "account-avatar", (account.alias || account.address.slice(2, 4)).slice(0, 2).toUpperCase()),
@@ -229,7 +252,7 @@ function renderAccounts() {
     );
     if (account.source !== "config") {
       const remove = make("button", "remove-account", "×");
-      remove.title = "移除";
+      remove.title = account.source === "web" ? "移除" : "移除（会同时取消 Telegram 那边的订阅）";
       remove.addEventListener("click", async (event) => {
         event.stopPropagation();
         try {

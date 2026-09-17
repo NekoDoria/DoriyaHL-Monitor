@@ -6,6 +6,10 @@ import sqlite3
 import threading
 
 
+# Web 面板在 subscriptions / whale_* 表里使用的虚拟 chat_id。
+WEB_CHAT_ID = "__web__"
+
+
 def _as_float(value, default=0.0):
     try:
         return float(value)
@@ -589,6 +593,16 @@ class EventStore:
             )
             self.conn.commit()
 
+    def delete_subscriptions_by_address(self, address):
+        """把某个地址从所有聊天里取消订阅，返回受影响的行数。"""
+        with self._lock:
+            cur = self.conn.execute(
+                "DELETE FROM subscriptions WHERE address = ?",
+                (str(address).lower(),),
+            )
+            self.conn.commit()
+        return cur.rowcount
+
     def clear_subscriptions(self, chat_id):
         with self._lock:
             self.conn.execute(
@@ -747,14 +761,19 @@ class EventStore:
             )
             self.conn.commit()
 
-    def recent_whale_txs(self, chat_id, limit=50):
+    def recent_whale_txs(self, chat_id=None, limit=50):
+        query = (
+            "SELECT chain, token, address, tx_hash, ts, direction,"
+            " counterparty, value, asset, url FROM whale_txs"
+        )
+        params = []
+        if chat_id is not None:
+            query += " WHERE chat_id = ?"
+            params.append(str(chat_id))
+        query += " ORDER BY ts DESC LIMIT ?"
+        params.append(int(limit))
         with self._lock:
-            rows = self.conn.execute(
-                "SELECT chain, token, address, tx_hash, ts, direction,"
-                " counterparty, value, asset, url FROM whale_txs"
-                " WHERE chat_id = ? ORDER BY ts DESC LIMIT ?",
-                (str(chat_id), int(limit)),
-            ).fetchall()
+            rows = self.conn.execute(query, params).fetchall()
         return [
             {
                 "chain": row[0],

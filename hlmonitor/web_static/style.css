@@ -550,3 +550,11 @@ button:focus-visible, input:focus-visible { outline: 2px solid var(--accent); ou
 /* 链上筹码：成交列表 */
 .tx-link { color: var(--accent); text-decoration: none; }
 .tx-link:hover { text-decoration: underline; }
+/* 账户来源标记 */
+.account-source {
+  margin-left: 6px; padding: 1px 6px; border-radius: 999px;
+  font-size: 10px; font-weight: 600; font-style: normal; vertical-align: middle;
+}
+.account-source.telegram { color: #9ecbff; background: rgba(110,170,255,.16); }
+.account-source.both { color: #ffd79a; background: rgba(255,184,107,.18); }
+.account-source.web { color: #8df0cd; background: rgba(56,209,167,.14); }

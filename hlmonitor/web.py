@@ -20,7 +20,7 @@ from .brief import cluster_open_orders, interval_stats
 from .format import AMOUNT_STYLES, set_amount_style
 from .monitor import AddressMonitor
 from .net import build_opener
-from .state import EventStore
+from .state import WEB_CHAT_ID, EventStore
 from .whale import (
     DEFAULT_EXCLUDE_LABEL_KEYWORDS,
     DEFAULT_EXCLUDE_TAGS,
@@ -85,7 +85,7 @@ class WebApp:
             store=self.store,
             notifier=_NoNotifications(),
         )
-        self.web_chat_id = "__web__"
+        self.web_chat_id = WEB_CHAT_ID
         self.chart_cache = {}
         self.chart_cache_ttl = 15.0
         self.whale_cache = {}
@@ -100,26 +100,46 @@ class WebApp:
         self.store.close()
 
     def accounts(self):
-        configured = {
-            address: {"source": "config", "alias": ""}
-            for address in self.config.addresses
-        }
-        for row in self.store.get_subscriptions(self.web_chat_id, active_only=False):
-            item = configured.setdefault(
-                row["address"],
-                {"source": "web", "alias": row.get("alias", "")},
+        """仪表盘展示的账户 = config.toml 里的地址 + 所有聊天订阅的并集。
+
+        Telegram 里的 /add 是把地址挂在各自的 chat_id 下，如果这里只看
+        __web__，机器人加的地址在网页上就完全看不到。
+        """
+        merged = {}
+        for address in self.config.addresses:
+            merged[address] = {"alias": "", "chats": set(), "configured": True}
+        for row in self.store.get_subscriptions(active_only=False):
+            address = str(row.get("address") or "").lower()
+            if not address:
+                continue
+            item = merged.setdefault(
+                address, {"alias": "", "chats": set(), "configured": False}
             )
-            if item.get("source") != "config":
-                item["alias"] = row.get("alias", "")
-                item["source"] = "web"
-        return [
-            {
-                "address": address,
-                "alias": meta.get("alias", ""),
-                "source": meta.get("source", "web"),
-            }
-            for address, meta in sorted(configured.items())
-        ]
+            item["chats"].add(str(row.get("chat_id")))
+            alias = str(row.get("alias") or "").strip()
+            if alias and not item["alias"]:
+                item["alias"] = alias
+
+        result = []
+        for address, meta in sorted(merged.items()):
+            chats = meta["chats"]
+            if meta["configured"]:
+                source = "config"
+            elif self.web_chat_id in chats and len(chats) > 1:
+                source = "both"
+            elif self.web_chat_id in chats:
+                source = "web"
+            else:
+                source = "telegram"
+            result.append(
+                {
+                    "address": address,
+                    "alias": meta["alias"],
+                    "source": source,
+                    "chat_count": len(chats),
+                }
+            )
+        return result
 
     def account(self, raw_address):
         address = normalize_address(raw_address)
@@ -138,7 +158,10 @@ class WebApp:
             raise KeyError("account not found")
         if item["source"] == "config":
             raise PermissionError("configured accounts are removed in config.toml")
-        self.store.unsubscribe(self.web_chat_id, address)
+        # 仪表盘看到的是全部订阅，删除时也一并清掉，否则 Telegram 那边
+        # 还会继续监控，界面却显示已移除。
+        removed = self.store.delete_subscriptions_by_address(address)
+        item["removed_chats"] = removed
         return item
 
     def overview_data(self, raw_address):
