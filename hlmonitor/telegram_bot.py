@@ -990,11 +990,19 @@ class TelegramClient:
 class TelegramRouter:
     """Route monitor events to chats subscribed to the affected address."""
 
-    def __init__(self, client: TelegramClient, store: EventStore, fallback_chat_id=None, api=None):
+    def __init__(
+        self,
+        client: TelegramClient,
+        store: EventStore,
+        fallback_chat_id=None,
+        api=None,
+        monitor=None,
+    ):
         self.client = client
         self.store = store
         self.fallback_chat_id = str(fallback_chat_id) if fallback_chat_id else None
         self.api = api
+        self.monitor = monitor
         self._fill_buffers = {}
         self._fill_lock = threading.RLock()
         self._fill_dirty = set()
@@ -1553,6 +1561,7 @@ class TelegramBot:
             self.store,
             fallback_chat_id=self.fallback_chat_id,
             api=self.monitor.api,
+            monitor=self.monitor,
         )
         if monitor is None:
             self.monitor.notifier = self.router
