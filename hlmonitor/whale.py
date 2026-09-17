@@ -243,6 +243,11 @@ def _http_error_message(exc, body):
             "Blockchair 限流（HTTP 430）：该出口 IP 被临时拉黑。"
             "可在 [whales] 配置 blockchair_key，或降低扫描频率、等几分钟再试"
         )
+    if exc.code == 429:
+        return (
+            "数据源限流（HTTP 429）：短时间内请求过多，稍后会自动恢复。"
+            "可以把 [whales] 的 watch_interval_minutes 调大以降低请求频率"
+        )
     detail = ""
     if body:
         try:
@@ -261,9 +266,16 @@ class HttpClient:
         self.timeout = float(timeout)
         self.retries = max(0, int(retries))
 
-    def _fetch(self, req):
+    def _fetch(self, build_request):
+        """build_request 每次调用都要返回全新的 Request。
+
+        urllib 的 ProxyHandler 会原地改写 Request（把 scheme 标记成 socks5），
+        复用同一个对象重试时第二次会直接报 “unknown url type: socks5”，
+        把真正的原因盖掉，所以这里每轮都重建。
+        """
         last_error = None
         for attempt in range(self.retries + 1):
+            req = build_request()
             try:
                 with self.opener.open(req, timeout=self.timeout) as resp:
                     return resp.read()
@@ -302,8 +314,10 @@ class HttpClient:
             if clean:
                 sep = "&" if "?" in url else "?"
                 url = f"{url}{sep}{urllib.parse.urlencode(clean)}"
-        req = urllib.request.Request(url, headers=self._headers(headers))
-        payload = self._fetch(req)
+        def build_request():
+            return urllib.request.Request(url, headers=self._headers(headers))
+
+        payload = self._fetch(build_request)
         try:
             return json.loads(payload.decode("utf-8"))
         except (ValueError, UnicodeDecodeError) as exc:
@@ -314,10 +328,12 @@ class HttpClient:
         extra = {"Content-Type": "application/json"}
         if headers:
             extra.update(headers)
-        req = urllib.request.Request(
-            url, data=data, headers=self._headers(extra), method="POST"
-        )
-        payload = self._fetch(req)
+        def build_request():
+            return urllib.request.Request(
+                url, data=data, headers=self._headers(extra), method="POST"
+            )
+
+        payload = self._fetch(build_request)
         try:
             result = json.loads(payload.decode("utf-8"))
         except (ValueError, UnicodeDecodeError) as exc:
