@@ -195,6 +195,11 @@
                   <button type="button" data-overlay="volume" class="active">成交量</button>
                   <button type="button" data-overlay="whale">Autohunt 区间</button>
                 </div>
+                <div class="fill-window-control">
+                  <div class="merge-head"><span>成交区间回看</span><span id="fill-window-value">1天</span></div>
+                  <select id="chart-fill-window" class="chart-select fill-window-select" aria-label="成交区间回看窗口"></select>
+                  <div class="merge-scale"><span>K 线周期与回看窗口互相独立</span></div>
+                </div>
                 <div class="merge-control">
                   <div class="merge-head"><span>聚合程度</span><span id="merge-value">1.0x</span></div>
                   <input id="merge-slider" class="merge-slider" type="range" min="0.25" max="4" step="0.25" value="1" aria-label="挂单聚合程度">

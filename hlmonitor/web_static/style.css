@@ -532,3 +532,10 @@ button:focus-visible, input:focus-visible { outline: 2px solid var(--accent); ou
 .onchain-failure-toggle { margin-top: 5px; color: var(--muted); font-size: 11px; }
 .onchain-failure-item:hover .onchain-failure-toggle { color: var(--text); }
 .onchain-failure-item:hover { border-color: rgba(255,122,122,.45); }
+/* 图表：成交区间回看窗口（与 K 线周期独立） */
+.fill-window-control {
+  display: grid; gap: 6px; padding: 10px;
+  border: 1px solid var(--border); border-radius: 9px; background: #242424;
+}
+.fill-window-select { width: 100%; min-width: 0; }
+.fill-window-control .merge-scale { justify-content: flex-start; }

@@ -6,6 +6,7 @@ const state = {
   ordersLevel: "auto",
   chartCoin: "",
   chartInterval: "15m",
+  fillWindow: localStorage.getItem("hl.fillWindow") || "1440",
   merge: Math.min(4, Math.max(0.25, parseFloat(localStorage.getItem("hl.merge")) || 1)),
   chartData: null,
   whaleChain: localStorage.getItem("hl.whaleChain") || "",
@@ -54,6 +55,8 @@ const els = {
   chartRefresh: document.getElementById("chart-refresh"),
   chartFullscreen: document.getElementById("chart-fullscreen"),
   chartSideToggle: document.getElementById("chart-side-toggle"),
+  chartFillWindow: document.getElementById("chart-fill-window"),
+  fillWindowValue: document.getElementById("fill-window-value"),
   mergeSlider: document.getElementById("merge-slider"),
   mergeValue: document.getElementById("merge-value"),
   positionHitbox: document.getElementById("position-hitbox"),
@@ -564,14 +567,35 @@ function updateOrderZoneOverlays() {
   }
 }
 
-const CHART_FILL_WINDOWS = {
-  "1m": 60,
-  "5m": 240,
-  "15m": 1440,
-  "1h": 4320,
-  "4h": 10080,
-  "1d": 10080,
-};
+// 成交区间回看窗口，与 K 线周期互相独立。
+// 后端把窗口限制在 60 ~ 10080 分钟，这里只提供该区间内的选项。
+const FILL_WINDOW_OPTIONS = [
+  [60, "1小时"],
+  [240, "4小时"],
+  [1440, "1天"],
+  [4320, "3天"],
+  [10080, "1周"],
+];
+
+function syncFillWindowLabel() {
+  const found = FILL_WINDOW_OPTIONS.find(([value]) => String(value) === String(state.fillWindow));
+  if (els.fillWindowValue) els.fillWindowValue.textContent = found ? found[1] : "1天";
+}
+
+function initFillWindowSelect() {
+  const select = els.chartFillWindow;
+  if (!select) return;
+  select.replaceChildren();
+  for (const [value, label] of FILL_WINDOW_OPTIONS) {
+    const option = make("option", "", label);
+    option.value = String(value);
+    select.append(option);
+  }
+  const allowed = FILL_WINDOW_OPTIONS.map(([value]) => String(value));
+  if (!allowed.includes(String(state.fillWindow))) state.fillWindow = "1440";
+  select.value = String(state.fillWindow);
+  syncFillWindowLabel();
+}
 const ZONE_DIR_MAP = {
   "Open Long": "开多",
   "Close Long": "平多",
@@ -1898,7 +1922,7 @@ function endpoint(view) {
   if (view === "orders") return `/api/orders?address=${address}&level=${state.ordersLevel}`;
   if (view === "chart") {
     const coin = encodeURIComponent(state.chartCoin || "BTC");
-    const fillWindow = CHART_FILL_WINDOWS[state.chartInterval] || 1440;
+    const fillWindow = Number(state.fillWindow) || 1440;
     const whaleParam = state.overlays.whale ? "&whale=1" : "";
     const mergeParam = `&merge=${state.merge}`;
     return `/api/chart?address=${address}&coin=${coin}&interval=${state.chartInterval}&fill_window_min=${fillWindow}${whaleParam}${mergeParam}`;
@@ -1990,6 +2014,13 @@ els.ordersLevel.addEventListener("click", (event) => {
   state.ordersLevel = button.dataset.level;
   for (const node of els.ordersLevel.querySelectorAll("button")) node.classList.toggle("active", node === button);
   if (state.view === "orders") loadView(true);
+});
+
+els.chartFillWindow.addEventListener("change", () => {
+  state.fillWindow = els.chartFillWindow.value;
+  localStorage.setItem("hl.fillWindow", state.fillWindow);
+  syncFillWindowLabel();
+  if (state.view === "chart") loadView(true);
 });
 
 els.chartInterval.addEventListener("click", (event) => {
@@ -2171,6 +2202,7 @@ els.accountForm.addEventListener("submit", async (event) => {
   }
 });
 
+initFillWindowSelect();
 setView("overview");
 loadState()
   .then(() => loadView(true))
