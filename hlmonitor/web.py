@@ -1053,9 +1053,8 @@ class WebApp:
         )
         return {"added": True}
 
-    def whale_check(self):
-        """立即刷新一次监控地址余额，返回最新的整体数据。"""
-        watcher = WhaleWatcher(
+    def _holder_watcher(self):
+        return WhaleWatcher(
             self.holder_adapters(),
             self.store,
             interval=self.config.whales.watch_interval_minutes * 60.0,
@@ -1064,7 +1063,41 @@ class WebApp:
             exclude_keywords=self._holder_exclude_keywords(),
             concentration_threshold=self.config.whales.concentration_threshold,
         )
-        watcher.check_addresses(force=True, chat_id=self.web_chat_id)
+
+    def whale_check(self, targets=None):
+        """刷新监控地址余额。
+
+        targets 为 [{"chain","token","address"}] 时只刷这些（单条或单组），
+        不传则全刷。用完整三元组定位，避免同地址跨链时误刷。
+        """
+        wanted = None
+        if targets is not None:
+            if not isinstance(targets, (list, tuple)) or not targets:
+                raise ValueError("targets 需要是非空数组")
+            wanted = set()
+            for item in targets:
+                if not isinstance(item, dict):
+                    raise ValueError("targets 每一项都应该是对象")
+                chain = str(item.get("chain") or "").strip().lower()
+                token = str(item.get("token") or "").strip()
+                address = str(item.get("address") or "").strip()
+                if not chain or not address:
+                    raise ValueError("targets 每一项都需要 chain 和 address")
+                wanted.add((chain, token, address))
+        self._holder_watcher().check_addresses(
+            force=True, chat_id=self.web_chat_id, targets=wanted
+        )
+        return self.whale_data()
+
+    def whale_rescan(self, chain, token):
+        """复扫单个订阅代币的筹码结构。"""
+        chain = str(chain or "").strip().lower()
+        token = str(token or "").strip()
+        if not chain or not token:
+            raise ValueError("缺少链或代币")
+        self._holder_watcher().check_tokens(
+            force=True, chat_id=self.web_chat_id, tokens={(chain, token)}
+        )
         return self.whale_data()
 
 
@@ -1208,7 +1241,14 @@ class WebRequestHandler(BaseHTTPRequestHandler):
             elif path == "/api/whale/token":
                 self._send_json(200, self.app.whale_mutate("token", data))
             elif path == "/api/whale/check":
-                self._send_json(200, self.app.whale_check())
+                self._send_json(
+                    200, self.app.whale_check(data.get("targets"))
+                )
+            elif path == "/api/whale/rescan":
+                self._send_json(
+                    200,
+                    self.app.whale_rescan(data.get("chain"), data.get("token")),
+                )
             else:
                 self._send_json(404, {"error": "API not found"})
         except Exception as exc:

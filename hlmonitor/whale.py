@@ -1527,10 +1527,28 @@ class WhaleWatcher:
 
     # ---------------------------------------------------------------- 地址余额
 
-    def check_addresses(self, force=False, chat_id=None):
+    def check_addresses(self, force=False, chat_id=None, targets=None):
+        """检查余额。
+
+        targets 为 (chain, token, address) 集合时只查这些条目。
+        必须带上链和代币：同一个地址可能在不同链上被分别监控。
+        """
         alerts = []
         now_ms = int(time.time() * 1000)
+        wanted = None
+        if targets is not None:
+            wanted = {(str(c), str(t), str(a)) for c, t, a in targets}
+            if not wanted:
+                return alerts
         for entry in self.store.due_whale_watches(now_ms, force=force, chat_id=chat_id):
+            if wanted is not None:
+                key = (
+                    str(entry.get("chain") or ""),
+                    str(entry.get("token") or ""),
+                    str(entry.get("address") or ""),
+                )
+                if key not in wanted:
+                    continue
             try:
                 alert = self._check_watch(entry, now_ms)
             except Exception as exc:
@@ -1645,10 +1663,20 @@ class WhaleWatcher:
 
     # ------------------------------------------------------------ 代币集中度
 
-    def check_tokens(self, force=False, chat_id=None):
+    def check_tokens(self, force=False, chat_id=None, tokens=None):
+        """复扫订阅代币；tokens 为 (chain, token) 集合时只扫这些。"""
         alerts = []
         now_ms = int(time.time() * 1000)
+        wanted = None
+        if tokens is not None:
+            wanted = {(str(c), str(t)) for c, t in tokens}
+            if not wanted:
+                return alerts
         for entry in self.store.due_whale_tokens(now_ms, force=force, chat_id=chat_id):
+            if wanted is not None:
+                key = (str(entry.get("chain") or ""), str(entry.get("token") or ""))
+                if key not in wanted:
+                    continue
             try:
                 alert = self._check_token(entry, now_ms)
             except Exception as exc:

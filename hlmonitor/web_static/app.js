@@ -1063,6 +1063,70 @@ function statusCell(row) {
   return node;
 }
 
+const WHALE_ERROR_GROUP = "__errors__";
+
+async function refreshWhaleTargets(targets, button, busyText) {
+  const original = button ? button.textContent : "";
+  if (button) {
+    button.disabled = true;
+    button.textContent = busyText || "刷新中…";
+  }
+  try {
+    const data = await request("/api/whale/check", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ targets }),
+    });
+    state.whaleData = data;
+    clearState("whale");
+    renderWhale(data);
+    setUpdatedAt(data.generated_at);
+  } catch (error) {
+    showState("whale", "error", apiErrorText(error));
+    if (button) {
+      button.disabled = false;
+      button.textContent = original;
+    }
+  }
+}
+
+async function rescanWhaleToken(chain, token, button) {
+  const original = button ? button.textContent : "";
+  if (button) {
+    button.disabled = true;
+    button.textContent = "复扫中…";
+  }
+  try {
+    const data = await request("/api/whale/rescan", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ chain, token }),
+    });
+    state.whaleData = data;
+    clearState("whale");
+    renderWhale(data);
+    setUpdatedAt(data.generated_at);
+  } catch (error) {
+    showState("whale", "error", apiErrorText(error));
+    if (button) {
+      button.disabled = false;
+      button.textContent = original;
+    }
+  }
+}
+
+function clickableToggle(node, collapsed, onToggle) {
+  node.setAttribute("role", "button");
+  node.setAttribute("tabindex", "0");
+  node.addEventListener("click", onToggle);
+  node.addEventListener("keydown", (event) => {
+    if (event.key !== "Enter" && event.key !== " ") return;
+    event.preventDefault();
+    onToggle();
+  });
+  return node;
+}
+
 function renderWhaleErrors(info, body) {
   const failures = [];
   for (const row of info.watches) {
@@ -1088,20 +1152,42 @@ function renderWhaleErrors(info, body) {
   if (!failures.length) return;
 
   const card = make("div", "onchain-card onchain-failure-card");
-  card.append(make("div", "onchain-title", `检查失败（${failures.length}）`));
-  const list = make("div", "onchain-failure-list");
+  const cardCollapsed = collapsedGroups().has(WHALE_ERROR_GROUP);
+  const caret = make("span", `onchain-caret${cardCollapsed ? " collapsed" : ""}`, "▾");
+  const head = make("div", "onchain-card-head");
+  head.append(caret);
+  head.append(make("span", "onchain-title", `检查失败（${failures.length}）`));
+  head.append(make("span", "onchain-hint-inline", "点击收起 / 展开"));
+  card.append(head);
+
+  const list = make("div", `onchain-failure-list${cardCollapsed ? " collapsed" : ""}`);
   for (const item of failures) {
     const node = make("div", "onchain-failure-item");
-    const head = make("div", "onchain-failure-head");
-    head.append(make("span", "onchain-failure-kind", item.kind));
-    head.append(make("span", "onchain-failure-name", item.name));
-    if (item.at) head.append(make("span", "onchain-failure-time", relativeTime(item.at)));
-    node.append(head);
+    const itemHead = make("div", "onchain-failure-head");
+    itemHead.append(make("span", "onchain-failure-kind", item.kind));
+    itemHead.append(make("span", "onchain-failure-name", item.name));
+    if (item.at) itemHead.append(make("span", "onchain-failure-time", relativeTime(item.at)));
+    node.append(itemHead);
     node.append(make("div", "onchain-failure-target", item.target));
-    node.append(make("div", "onchain-failure-message", item.error));
+
+    const message = make("div", "onchain-failure-message clamped", item.error);
+    node.append(message);
+    const toggle = make("div", "onchain-failure-toggle", "展开完整原因");
+    node.append(toggle);
+    clickableToggle(node, true, () => {
+      const clamped = message.classList.toggle("clamped");
+      toggle.textContent = clamped ? "展开完整原因" : "收起";
+    });
     list.append(node);
   }
   card.append(list);
+
+  clickableToggle(head, cardCollapsed, () => {
+    const nowCollapsed = !collapsedGroups().has(WHALE_ERROR_GROUP);
+    setGroupCollapsed(WHALE_ERROR_GROUP, nowCollapsed);
+    list.classList.toggle("collapsed", nowCollapsed);
+    caret.classList.toggle("collapsed", nowCollapsed);
+  });
   body.append(card);
 }
 
@@ -1215,7 +1301,7 @@ function renderWhaleScan(scan, body) {
         });
         await refreshWhale();
       } catch (error) {
-        showState("whale", "error", error.message);
+        showState("whale", "error", apiErrorText(error));
         button.disabled = false;
       }
     }));
@@ -1247,7 +1333,7 @@ function renderWhaleScan(scan, body) {
       });
       await refreshWhale();
     } catch (error) {
-      showState("whale", "error", error.message);
+      showState("whale", "error", apiErrorText(error));
     } finally {
       button.disabled = false;
     }
@@ -1304,7 +1390,7 @@ function whaleAddForm(info) {
         });
         await refreshWhale();
       } catch (error) {
-        showState("whale", "error", error.message);
+        showState("whale", "error", apiErrorText(error));
         button.disabled = false;
       }
     }),
@@ -1337,7 +1423,15 @@ function setGroupCollapsed(name, collapsed) {
 
 function whaleWatchRow(row) {
   const action = make("td");
-  action.append(rowActionButton("移除", "danger", async (event) => {
+  const actions = make("div", "row-actions");
+  actions.append(rowActionButton("刷新", "", (event) => {
+    event.stopPropagation();
+    refreshWhaleTargets(
+      [{ chain: row.chain, token: row.token, address: row.address }],
+      event.currentTarget,
+    );
+  }));
+  actions.append(rowActionButton("移除", "danger", async (event) => {
     const button = event.currentTarget;
     button.disabled = true;
     try {
@@ -1354,6 +1448,7 @@ function whaleWatchRow(row) {
       button.disabled = false;
     }
   }));
+  action.append(actions);
   return [
     cell(row.chain),
     addressCell(row.address),
@@ -1382,13 +1477,21 @@ function renderWhaleWatchGroups(info, body) {
     const isCollapsed = collapsed.has(name);
 
     const block = make("div", "onchain-group");
-    const head = make("button", "onchain-group-head");
-    head.type = "button";
-    head.setAttribute("aria-expanded", String(!isCollapsed));
+    const head = make("div", "onchain-group-head");
     head.append(make("span", `onchain-caret${isCollapsed ? " collapsed" : ""}`, "▾"));
     head.append(make("span", "onchain-group-name", name));
     head.append(make("span", "onchain-group-meta", `${rows.length} 个地址 · ${chains.length} 条链`));
     if (failed) head.append(make("span", "onchain-group-failed", `${failed} 个失败`));
+    head.append(make("span", "onchain-group-spacer"));
+    head.append(rowActionButton("刷新本组", "", (event) => {
+      event.stopPropagation();
+      refreshWhaleTargets(
+        rows.map((row) => ({
+          chain: row.chain, token: row.token, address: row.address,
+        })),
+        event.currentTarget,
+      );
+    }));
     block.append(head);
 
     const inner = make("div", `onchain-group-body${isCollapsed ? " collapsed" : ""}`);
@@ -1398,7 +1501,7 @@ function renderWhaleWatchGroups(info, body) {
     ));
     block.append(inner);
 
-    head.addEventListener("click", () => {
+    clickableToggle(head, isCollapsed, () => {
       const nowCollapsed = !collapsedGroups().has(name);
       setGroupCollapsed(name, nowCollapsed);
       inner.classList.toggle("collapsed", nowCollapsed);
@@ -1432,7 +1535,12 @@ function renderWhaleTokens(info, body) {
   }
   const rows = info.tokens.map((row) => {
     const action = make("td");
-    action.append(rowActionButton("取消订阅", "danger", async (event) => {
+    const actions = make("div", "row-actions");
+    actions.append(rowActionButton("复扫", "", (event) => {
+      event.stopPropagation();
+      rescanWhaleToken(row.chain, row.token, event.currentTarget);
+    }));
+    actions.append(rowActionButton("取消订阅", "danger", async (event) => {
       const button = event.currentTarget;
       button.disabled = true;
       try {
@@ -1443,10 +1551,11 @@ function renderWhaleTokens(info, body) {
         });
         await refreshWhale();
       } catch (error) {
-        showState("whale", "error", error.message);
+        showState("whale", "error", apiErrorText(error));
         button.disabled = false;
       }
     }));
+    action.append(actions);
     return [
       cell(row.symbol || row.token),
       cell(row.chain),

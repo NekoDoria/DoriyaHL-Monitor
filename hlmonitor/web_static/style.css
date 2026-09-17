@@ -512,3 +512,23 @@ button:focus-visible, input:focus-visible { outline: 2px solid var(--accent); ou
 .onchain-group-body { padding: 0 13px 13px; }
 .onchain-group-body.collapsed { display: none; }
 .onchain-group-body .data-table-wrap { margin-top: 0; }
+/* 链上筹码：操作按钮与可折叠报错 */
+.row-actions { display: flex; gap: 6px; justify-content: flex-end; }
+.onchain-card-head {
+  display: flex; align-items: center; gap: 9px; flex-wrap: wrap;
+  cursor: pointer; user-select: none;
+}
+.onchain-card-head:hover .onchain-title { color: #fff; }
+.onchain-hint-inline { color: var(--muted); font-size: 11px; }
+.onchain-group-head { cursor: pointer; user-select: none; }
+.onchain-group-spacer { flex: 1 1 auto; }
+.onchain-group-head .row-button { flex: 0 0 auto; }
+.onchain-failure-list.collapsed { display: none; }
+.onchain-failure-item { cursor: pointer; }
+.onchain-failure-message.clamped {
+  display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+.onchain-failure-toggle { margin-top: 5px; color: var(--muted); font-size: 11px; }
+.onchain-failure-item:hover .onchain-failure-toggle { color: var(--text); }
+.onchain-failure-item:hover { border-color: rgba(255,122,122,.45); }
