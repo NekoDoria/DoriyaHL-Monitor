@@ -400,6 +400,27 @@ class EventStore:
                 out.append((str(chat_id), name))
         return out
 
+    def all_autohunt_configs(self):
+        """跨聊天汇总所有 autohunt 进程配置。"""
+        with self._lock:
+            rows = self.conn.execute(
+                "SELECT chat_id, key, value FROM chat_settings"
+                " WHERE key LIKE 'autohunt_proc:%'"
+            ).fetchall()
+        grouped = {}
+        prefix = "autohunt_proc:"
+        for chat_id, key, value in rows:
+            rest = str(key)[len(prefix):]
+            if ":" not in rest:
+                continue
+            name, field = rest.rsplit(":", 1)
+            if not name:
+                continue
+            grouped.setdefault((str(chat_id), name), {})[field] = value
+        return [
+            {"chat_id": chat_id, "name": name, "settings": settings}
+            for (chat_id, name), settings in sorted(grouped.items())
+        ]
     def chat_ids_with_setting(self, key, value="1"):
         with self._lock:
             rows = self.conn.execute(

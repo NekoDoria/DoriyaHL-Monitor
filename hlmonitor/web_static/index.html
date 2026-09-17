@@ -1,0 +1,220 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%2338d1a7'/%3E%3Ctext x='16' y='21' font-family='Arial' font-size='11' font-weight='700' text-anchor='middle' fill='%2308221b'%3EHL%3C/text%3E%3C/svg%3E">
+  <title>Hyperliquid Monitor</title>
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <div class="app">
+    <aside id="sidebar" class="sidebar" aria-label="导航和账户">
+      <div class="sidebar-top">
+        <div class="brand">
+          <span class="brand-mark">HL</span>
+          <span>Hyperliquid</span>
+        </div>
+        <nav id="view-nav" class="view-nav">
+          <button class="nav-button" type="button" data-view="chart">
+            <svg viewBox="0 0 24 24"><path d="M8 6v12M12 4v16M16 8v8"/></svg>
+            <span>图表</span>
+          </button>
+          <button class="nav-button active" type="button" data-view="overview">
+            <svg viewBox="0 0 24 24"><path d="M4 13h6V4H4zM14 20h6v-9h-6zM4 20h6v-4H4zM14 8h6V4h-6z"/></svg>
+            <span>总览</span>
+          </button>
+          <button class="nav-button" type="button" data-view="fills">
+            <svg viewBox="0 0 24 24"><path d="M3 17l5-5 4 4 8-8"/><path d="M15 8h5v5"/></svg>
+            <span>成交</span>
+          </button>
+          <button class="nav-button" type="button" data-view="orders">
+            <svg viewBox="0 0 24 24"><path d="M4 7h16M4 12h10M4 17h16"/></svg>
+            <span>挂单</span>
+          </button>
+          <button class="nav-button" type="button" data-view="tpsl">
+            <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="8"/><path d="M12 8v4l3 2"/></svg>
+            <span>止盈止损</span>
+          </button>
+          <button class="nav-button" type="button" data-view="history">
+            <svg viewBox="0 0 24 24"><path d="M4 12a8 8 0 1 0 3-6"/><path d="M4 4v5h5"/><path d="M12 8v4l3 2"/></svg>
+            <span>历史</span>
+          </button>
+          <button class="nav-button" type="button" data-view="autohunt">
+            <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="8"/><circle cx="12" cy="12" r="3"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3"/></svg>
+            <span>Autohunt</span>
+          </button>          <button class="nav-button" type="button" data-view="events">
+            <svg viewBox="0 0 24 24"><path d="M12 3l9 16H3z"/><path d="M12 10v4M12 17h.01"/></svg>
+            <span>事件</span>
+          </button>
+        </nav>
+      </div>
+
+      <section class="accounts">
+        <div class="section-head">
+          <h2>账户</h2>
+          <button id="toggle-account-form" class="icon-button" title="添加账户" aria-label="添加账户">+</button>
+        </div>
+        <form id="account-form" class="account-form" hidden>
+          <input id="account-address" name="address" placeholder="0x..." autocomplete="off" spellcheck="false" required>
+          <input id="account-alias" name="alias" placeholder="命名" autocomplete="off">
+          <button type="submit">添加</button>
+        </form>
+        <div id="account-list" class="account-list"></div>
+      </section>
+
+      <div class="sidebar-foot">
+        <span id="network-badge">MAINNET</span>
+        <span id="version"></span>
+      </div>
+    </aside>
+
+    <main class="main">
+      <header class="topbar">
+        <button id="sidebar-toggle" class="icon-button" aria-label="切换侧栏">
+          <svg viewBox="0 0 24 24"><path d="M4 7h16M4 12h16M4 17h16"/></svg>
+        </button>
+        <div class="context">
+          <div id="current-account" class="current-account">选择账户</div>
+          <div id="current-address" class="current-address">—</div>
+        </div>
+        <div id="updated-at" class="updated-at"></div>
+        <button id="refresh-button" class="refresh-button" type="button">
+          <svg viewBox="0 0 24 24"><path d="M20 12a8 8 0 1 1-3-6"/><path d="M20 4v5h-5"/></svg>
+          <span>刷新</span>
+        </button>
+      </header>
+
+      <div id="workspace" class="workspace">
+        <section class="panel active" data-panel="overview">
+          <div class="panel-head">
+            <div><h1>总览</h1><div class="panel-meta">账户与持仓</div></div>
+          </div>
+          <div class="panel-state"></div>
+          <div class="panel-body"></div>
+        </section>
+
+        <section class="panel" data-panel="fills">
+          <div class="panel-head">
+            <div><h1>成交</h1><div class="panel-meta">窗口统计</div></div>
+            <div class="segmented" id="fills-window">
+              <button type="button" data-window="5">5分</button>
+              <button type="button" data-window="15">15分</button>
+              <button type="button" data-window="60">1时</button>
+              <button type="button" data-window="240">4时</button>
+              <button type="button" data-window="1440" class="active">1天</button>
+              <button type="button" data-window="4320">3天</button>
+              <button type="button" data-window="10080">1周</button>
+            </div>
+          </div>
+          <div class="panel-state"></div>
+          <div class="panel-body"></div>
+        </section>
+
+        <section class="panel" data-panel="orders">
+          <div class="panel-head">
+            <div><h1>挂单</h1><div class="panel-meta">密集区间</div></div>
+            <div class="segmented" id="orders-level">
+              <button type="button" data-level="fine">细</button>
+              <button type="button" data-level="auto" class="active">自动</button>
+              <button type="button" data-level="coarse">粗</button>
+            </div>
+          </div>
+          <div class="panel-state"></div>
+          <div class="panel-body"></div>
+        </section>
+
+        <section class="panel" data-panel="tpsl">
+          <div class="panel-head">
+            <div><h1>止盈止损</h1><div class="panel-meta">当前触发单</div></div>
+          </div>
+          <div class="panel-state"></div>
+          <div class="panel-body"></div>
+        </section>
+
+        <section class="panel" data-panel="history">
+          <div class="panel-head">
+            <div><h1>历史</h1><div class="panel-meta">已平仓记录</div></div>
+          </div>
+          <div class="panel-state"></div>
+          <div class="panel-body"></div>
+        </section>
+
+        <section class="panel" data-panel="chart">
+          <div class="panel-head">
+            <div><h1>图表</h1><div class="panel-meta" id="chart-symbol-label">价格与区间</div></div>
+            <div class="chart-controls">
+              <select id="chart-symbol" class="chart-select" aria-label="币种"></select>
+              <div class="segmented" id="chart-interval">
+                <button type="button" data-interval="1m">1分</button>
+                <button type="button" data-interval="5m">5分</button>
+                <button type="button" data-interval="15m" class="active">15分</button>
+                <button type="button" data-interval="1h">1时</button>
+                <button type="button" data-interval="4h">4时</button>
+                <button type="button" data-interval="1d">1天</button>
+              </div>
+              <button id="chart-refresh" class="chart-tool" type="button" title="刷新图表">
+                <svg viewBox="0 0 24 24"><path d="M20 12a8 8 0 1 1-3-6"/><path d="M20 4v5h-5"/></svg>
+              </button>
+              <button id="chart-side-toggle" class="chart-tool" type="button" hidden>
+                <svg viewBox="0 0 24 24"><path d="M4 6h16v12H4z"/><path d="M15 6v12"/></svg>
+              </button>
+              <button id="chart-fullscreen" class="chart-tool" type="button">
+                <svg viewBox="0 0 24 24"><path d="M8 3H3v5M16 3h5v5M8 21H3v-5M16 21h5v-5"/></svg>
+                <span>全屏</span>
+              </button>            </div>
+          </div>
+          <div class="panel-state"></div>
+          <div class="panel-body">
+            <div class="chart-layout">
+              <div id="chart-container" class="chart-container">
+                <div id="price-chart" class="chart-canvas"></div>
+                <div id="zone-layer" class="zone-layer"></div>
+                <div id="position-hitbox" class="position-hitbox" hidden></div>
+                <div id="position-tooltip" class="chart-tooltip" hidden></div>
+                <div id="position-popup" class="position-popup" hidden></div>
+                <div id="zone-tooltip" class="chart-tooltip" hidden></div>
+                <div id="zone-popup" class="position-popup" hidden></div>
+                <button id="price-auto-button" class="price-auto-button" type="button" title="恢复价格轴自动缩放">Auto</button>
+              </div>
+              <aside class="chart-side">
+                <div class="chart-side-head">区间叠加</div>
+                <div id="chart-overlays" class="overlay-toggles">
+                  <button type="button" data-overlay="orders" class="active">挂单区间</button>
+                  <button type="button" data-overlay="fills" class="active">成交区间</button>
+                  <button type="button" data-overlay="tpsl" class="active">止盈止损</button>
+                  <button type="button" data-overlay="volume" class="active">成交量</button>
+                  <button type="button" data-overlay="whale">Autohunt 区间</button>
+                </div>
+                <div class="merge-control">
+                  <div class="merge-head"><span>聚合程度</span><span id="merge-value">1.0x</span></div>
+                  <input id="merge-slider" class="merge-slider" type="range" min="0.25" max="4" step="0.25" value="1" aria-label="挂单聚合程度">
+                  <div class="merge-scale"><span>细</span><span>粗</span></div>
+                </div>
+                <div id="chart-legend" class="chart-legend"></div>
+              </aside>
+            </div>
+          </div>
+        </section>
+        <section class="panel" data-panel="autohunt">
+          <div class="panel-head">
+            <div><h1>Autohunt</h1><div class="panel-meta">自动收集进程与已收录账户</div></div>
+          </div>
+          <div class="panel-state"></div>
+          <div class="panel-body"></div>
+        </section>
+        <section class="panel" data-panel="events">
+          <div class="panel-head">
+            <div><h1>事件</h1><div class="panel-meta">本地监控记录</div></div>
+          </div>
+          <div class="panel-state"></div>
+          <div class="panel-body"></div>
+        </section>
+      </div>
+    </main>
+  </div>
+  <script src="/vendor/lightweight-charts.standalone.production.js"></script>
+  <script src="/app.js"></script>
+</body>
+</html>
