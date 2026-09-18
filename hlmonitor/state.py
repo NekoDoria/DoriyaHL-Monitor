@@ -10,6 +10,10 @@ import threading
 WEB_CHAT_ID = "__web__"
 
 
+def _now_ms():
+    return int(time.time() * 1000)
+
+
 def _as_float(value, default=0.0):
     try:
         return float(value)
@@ -808,6 +812,138 @@ class EventStore:
                 " SELECT rowid FROM whale_txs ORDER BY ts DESC LIMIT 500)"
             )
             self.conn.commit()
+
+    def whale_tx_asset_summary(self, days=90):
+        """最近 N 天出现过的代币符号，供成交分析页选择。"""
+        since_ms = int(_now_ms() - int(days) * 86400000)
+        rows = self.conn.execute(
+            "SELECT asset, COUNT(*) AS count, MAX(ts) AS last_ms"
+            " FROM whale_txs WHERE ts >= ? GROUP BY asset"
+            " ORDER BY count DESC",
+            (since_ms,),
+        ).fetchall()
+        return [
+            {"asset": row[0], "count": int(row[1]), "last_ms": int(row[2] or 0)}
+            for row in rows
+        ]
+
+    def whale_txs_in_range(
+        self,
+        asset=None,
+        chain=None,
+        watched_address=None,
+        since_ms=0,
+        until_ms=None,
+        limit=2000,
+    ):
+        """按时间段取被跟踪地址的成交明细，供统计分析用。
+
+        asset 按代币符号匹配；watched_address 是我们监控的地址
+        （成交的"我方"），counterparty 是对手方。
+        """
+        clauses = ["ts >= ?"]
+        params = [int(since_ms or 0)]
+        if until_ms is not None:
+            clauses.append("ts <= ?")
+            params.append(int(until_ms))
+        if asset:
+            clauses.append("LOWER(asset) = ?")
+            params.append(str(asset).lower())
+        if chain:
+            clauses.append("chain = ?")
+            params.append(str(chain))
+        if watched_address:
+            clauses.append("LOWER(address) = ?")
+            params.append(str(watched_address).lower())
+        query = (
+            "SELECT chat_id, chain, token, address, tx_hash, ts, direction,"
+            " counterparty, value, asset, url FROM whale_txs WHERE "
+            + " AND ".join(clauses)
+            + " ORDER BY ts DESC LIMIT ?"
+        )
+        params.append(int(limit))
+        with self._lock:
+            rows = self.conn.execute(query, params).fetchall()
+        return [
+            {
+                "chat_id": row[0],
+                "chain": row[1],
+                "token": row[2],
+                "address": row[3],
+                "hash": row[4],
+                "time": int(row[5] or 0),
+                "direction": row[6],
+                "counterparty": row[7],
+                "value": row[8],
+                "asset": row[9],
+                "url": row[10],
+            }
+            for row in rows
+        ]
+
+    def whale_tx_counterparties(
+        self,
+        asset=None,
+        chain=None,
+        watched_address=None,
+        since_ms=0,
+        until_ms=None,
+        limit=200,
+    ):
+        """时间段内与被跟踪地址交互过的对手方聚合。"""
+        rows = self.whale_txs_in_range(
+            asset=asset,
+            chain=chain,
+            watched_address=watched_address,
+            since_ms=since_ms,
+            until_ms=until_ms,
+            limit=5000,
+        )
+        stats = {}
+        for row in rows:
+            peer = str(row.get("counterparty") or "").strip()
+            direction = str(row.get("direction") or "")
+            if not peer or direction == "self":
+                continue
+            key = (peer.lower(), direction)
+            item = stats.setdefault(
+                key,
+                {
+                    "counterparty": peer,
+                    "direction": direction,
+                    "count": 0,
+                    "value": 0.0,
+                    "first_ms": row.get("time") or 0,
+                    "last_ms": row.get("time") or 0,
+                    "chains": set(),
+                    "watched": set(),
+                },
+            )
+            item["count"] += 1
+            item["value"] += float(row.get("value") or 0)
+            item["first_ms"] = min(item["first_ms"], row.get("time") or 0)
+            item["last_ms"] = max(item["last_ms"], row.get("time") or 0)
+            if row.get("chain"):
+                item["chains"].add(row["chain"])
+            if row.get("address"):
+                item["watched"].add(row["address"].lower())
+
+        out = []
+        for (peer_lower, direction), item in stats.items():
+            out.append(
+                {
+                    "counterparty": item["counterparty"],
+                    "direction": direction,
+                    "count": item["count"],
+                    "value": item["value"],
+                    "first_ms": item["first_ms"],
+                    "last_ms": item["last_ms"],
+                    "chains": sorted(item["chains"]),
+                    "watched_accounts": sorted(item["watched"]),
+                }
+            )
+        out.sort(key=lambda row: (row["value"], row["count"]), reverse=True)
+        return out[: max(1, int(limit))]
 
     def recent_whale_txs(self, chat_id=None, limit=50):
         query = (
