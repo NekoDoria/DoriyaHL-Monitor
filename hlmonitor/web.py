@@ -27,7 +27,9 @@ from .whale import (
     ConcentrationReport,
     WhaleWatcher,
     build_adapters,
+    is_exchange_label,
     is_native_token,
+    parse_config_labels,
     resolve_token,
     scan_token,
     search_tokens,
@@ -1234,8 +1236,36 @@ class WebApp:
             ),
             reverse=True,
         )
+
+        # 给对手方贴标签：手工配置优先，其次是成交时攒下来的 Blockscout 标签。
+        labels = self.store.get_address_labels()
+        for item in parse_config_labels(self.config.whales.address_labels):
+            labels[(item["chain"], item["address"].lower())] = {
+                "label": item["label"],
+                "category": item["category"],
+                "source": "config",
+            }
+        exchange_deposit = 0.0
+        exchange_withdraw = 0.0
+        exchange_peers = 0
         for p in peer_rows:
             p["net"] = p["in"]["value"] - p["out"]["value"]
+            label = ""
+            category = ""
+            for chain_name in p["chains"]:
+                meta = labels.get((str(chain_name).lower(), p["counterparty"].lower()))
+                if meta:
+                    label = meta.get("label") or ""
+                    category = meta.get("category") or ""
+                    break
+            p["label"] = label
+            p["category"] = category
+            p["is_exchange"] = is_exchange_label(label, category)
+            if p["is_exchange"]:
+                exchange_peers += 1
+                # out = 我们把币打进交易所，in = 交易所打给我们。
+                exchange_deposit += p["out"]["value"]
+                exchange_withdraw += p["in"]["value"]
 
         # 最近交易也返回，最多 100 条。
         recent = rows[:100]
@@ -1259,6 +1289,10 @@ class WebApp:
                 - sum(float(r["value"] or 0) for r in outs),
                 "watched_count": len(watched_breakdown),
                 "peer_count": len(peer_rows),
+                "exchange_count": exchange_peers,
+                "exchange_deposit": exchange_deposit,
+                "exchange_withdraw": exchange_withdraw,
+                "exchange_net": exchange_withdraw - exchange_deposit,
             },
             "daily": series,
             "watched": sorted(

@@ -109,6 +109,7 @@ class WhaleConfig:
     disabled_chains: list = field(default_factory=list)
     exclude_tags: list = field(default_factory=list)      # 额外排除的地址标签
     exclude_label_keywords: list = field(default_factory=list)  # 额外排除的地址名关键词
+    address_labels: dict = field(default_factory=dict)  # "链:地址" -> 自定义标签
     exclude_addresses: list = field(default_factory=list)  # 手动排除的地址
     max_rows: int = 12                    # 扫描结果展示行数
     timeout: float = 25.0
@@ -335,6 +336,11 @@ def load_config(path: str | os.PathLike | None = None) -> Config:
             str(item).lower()
             for item in _as_list(whales_data.get("exclude_label_keywords"))
         ],
+        address_labels={
+            str(key).strip(): str(value).strip()
+            for key, value in (whales_data.get("address_labels") or {}).items()
+            if str(key).strip() and str(value).strip()
+        },
         exclude_addresses=[
             str(item) for item in _as_list(whales_data.get("exclude_addresses"))
         ],

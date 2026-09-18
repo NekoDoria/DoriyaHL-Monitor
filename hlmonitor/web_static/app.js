@@ -2054,6 +2054,42 @@ async function saveSettings(reset = false) {
 }
 // ---------------------------------------------------------------- 成交分析
 
+const TX_CATEGORY_LABELS = {
+  exchange: "交易所",
+  cex: "交易所",
+  dex: "DEX",
+  bridge: "跨链桥",
+  lending: "借贷",
+  staking: "质押",
+  custody: "托管",
+  protocol: "协议",
+  "phish--hack": "风险地址",
+};
+
+function txCategoryText(category) {
+  const first = String(category || "").split(",").find(Boolean);
+  if (!first) return "";
+  return TX_CATEGORY_LABELS[first] || first;
+}
+
+function counterpartyCell(row) {
+  const node = make("td", "wta-peer");
+  node.title = row.counterparty;
+  const line = make("div", "wta-peer-line");
+  line.append(make("code", "", shortAddress(row.counterparty)));
+  if (row.is_exchange) {
+    const badge = make("span", "account-source both", "交易所");
+    badge.title = "资金进出交易所会按这个标记归类";
+    line.append(badge);
+  } else {
+    const text = txCategoryText(row.category);
+    if (text) line.append(make("span", "account-source web", text));
+  }
+  node.append(line);
+  if (row.label) node.append(make("div", "wta-peer-label", row.label));
+  return node;
+}
+
 function renderWtaMetrics(summary) {
   const metrics = make("div", "metrics");
   const net = Number(summary.net_value) || 0;
@@ -2065,6 +2101,14 @@ function renderWtaMetrics(summary) {
     metric("对手方", String(summary.peer_count)),
     metric("参与地址", String(summary.watched_count)),
   );
+  if (Number(summary.exchange_count) > 0) {
+    metrics.append(
+      metric("存入交易所", formatAmount(summary.exchange_deposit), "negative"),
+      metric("从交易所提出", formatAmount(summary.exchange_withdraw), "positive"),
+      metric("交易所净流", signed(summary.exchange_net, formatAmount), pnlClass(summary.exchange_net)),
+      metric("交易所对手方", String(summary.exchange_count)),
+    );
+  }
   return metrics;
 }
 
@@ -2138,7 +2182,7 @@ function renderWta(data) {
       const outCell = cell(outV ? formatAmount(outV) : "—");
       outCell.title = `${row["out"].count} 笔`;
       return [
-        addressCell(row.counterparty),
+        counterpartyCell(row),
         inCell,
         outCell,
         cell(signed(net, formatAmount), pnlClass(net)),

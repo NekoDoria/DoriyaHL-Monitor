@@ -161,6 +161,16 @@ CREATE TABLE IF NOT EXISTS whale_scan_history (
     score         REAL,
     PRIMARY KEY (chain, token, scanned_ms)
 );
+CREATE TABLE IF NOT EXISTS address_labels (
+    chain      TEXT NOT NULL,
+    address    TEXT NOT NULL,
+    label      TEXT NOT NULL DEFAULT '',
+    category   TEXT NOT NULL DEFAULT '',
+    source     TEXT NOT NULL DEFAULT '',
+    updated_ms INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (chain, address)
+);
+CREATE INDEX IF NOT EXISTS idx_address_labels_label ON address_labels(label);
 CREATE TABLE IF NOT EXISTS whale_txs (
     chat_id      TEXT NOT NULL,
     chain        TEXT NOT NULL,
@@ -813,6 +823,61 @@ class EventStore:
                 " SELECT rowid FROM whale_txs ORDER BY ts DESC LIMIT 500)"
             )
             self.conn.commit()
+
+    def upsert_address_labels(self, entries, ts=None):
+        """缓存地址标签。source 用来区分 blockscout 抓的和手工配的。"""
+        rows = [
+            (
+                str(item.get("chain") or "").lower(),
+                str(item.get("address") or "").lower(),
+                str(item.get("label") or ""),
+                str(item.get("category") or ""),
+                str(item.get("source") or ""),
+                int(ts or _now_ms()),
+            )
+            for item in (entries or [])
+            if item.get("chain") and item.get("address")
+        ]
+        if not rows:
+            return 0
+        with self._lock:
+            self.conn.executemany(
+                "INSERT INTO address_labels("
+                " chain, address, label, category, source, updated_ms)"
+                " VALUES (?,?,?,?,?,?)"
+                " ON CONFLICT(chain, address) DO UPDATE SET"
+                " label = CASE WHEN excluded.label != ''"
+                "               THEN excluded.label ELSE address_labels.label END,"
+                " category = CASE WHEN excluded.category != ''"
+                "               THEN excluded.category ELSE address_labels.category END,"
+                " source = excluded.source,"
+                " updated_ms = excluded.updated_ms",
+                rows,
+            )
+            self.conn.commit()
+        return len(rows)
+
+    def get_address_labels(self, chain=None):
+        """返回 {(chain, address小写): {label, category, source}}。"""
+        query = (
+            "SELECT chain, address, label, category, source, updated_ms"
+            " FROM address_labels"
+        )
+        params = []
+        if chain:
+            query += " WHERE chain = ?"
+            params.append(str(chain).lower())
+        with self._lock:
+            rows = self.conn.execute(query, params).fetchall()
+        out = {}
+        for row in rows:
+            out[(str(row[0]).lower(), str(row[1]).lower())] = {
+                "label": str(row[2] or ""),
+                "category": str(row[3] or ""),
+                "source": str(row[4] or ""),
+                "updated_ms": int(row[5] or 0),
+            }
+        return out
 
     def whale_tx_asset_summary(self, days=90):
         """最近 N 天出现过的代币符号，供成交分析页选择。"""

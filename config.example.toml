@@ -89,6 +89,14 @@ retries = 2                       # 外部请求重试次数
 # 关闭不需要的链，减少请求量。
 # disabled_chains = ["dogecoin", "dash", "celo"]
 
+# 手工给地址打标签，写法是 "链:地址" = "标签"（子表形式）。
+# 标签里带交易所名称或 exchange 关键词的，成交分析页会自动归类成交易所，
+# 用来算「存入交易所 / 从交易所提出」。
+# [whales.address_labels]
+# "ethereum:0x28C6c06298d514Db089934071355E5743bf21d60" = "Binance: Hot Wallet 14"
+# "arbitrum:0xB38e8c17e38363aF6EbdCb3dAE12e0243582891D" = "Binance: Hot Wallet"
+# "hyperevm:0x1234..." = "某交易所"
+
 # 额外排除的地址标签 / 名称关键词 / 具体地址。
 # exclude_tags = ["vault"]
 # exclude_label_keywords = ["myexchange"]

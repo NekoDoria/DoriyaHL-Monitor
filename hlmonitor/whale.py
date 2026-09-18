@@ -43,6 +43,8 @@ __all__ = [
     "build_adapters",
     "scan_token",
     "search_tokens",
+    "parse_config_labels",
+    "is_exchange_label",
     "resolve_token",
     "rank_token_candidates",
     "TokenResolution",
@@ -98,6 +100,32 @@ DEFAULT_EXCLUDE_TAGS = (
     "custody",
     "gambling",
     "payment",
+)
+
+# 名称里出现这些词就当成交易所，用来判断资金是进所还是出所。
+EXCHANGE_LABEL_KEYWORDS = (
+    "binance",
+    "coinbase",
+    "okx",
+    "kraken",
+    "bybit",
+    "bitfinex",
+    "kucoin",
+    "gate.io",
+    "gateio",
+    "huobi",
+    "htx",
+    "gemini",
+    "crypto.com",
+    "upbit",
+    "bithumb",
+    "robinhood",
+    "bitstamp",
+    "poloniex",
+    "mexc",
+    "bitget",
+    "exchange",
+    "交易所",
 )
 
 # 有些交易所钱包在 Blockscout 上只有名称标签、没有 exchange 分类标签，
@@ -199,6 +227,40 @@ def _parse_iso_ms(value):
         return int(datetime.fromisoformat(cleaned).timestamp() * 1000)
     except (ValueError, TypeError, OSError):
         return 0
+
+
+def is_exchange_label(label, category=""):
+    """判断某个地址是不是交易所。
+
+    先看分类标签（Blockscout 的 generic tag，如 exchange / cex），
+    再退回名称关键词，因为不少交易所钱包只有名称标签。
+    """
+    tags = str(category or "").lower()
+    if "exchange" in tags or "cex" in tags:
+        return True
+    name = str(label or "").lower()
+    if not name:
+        return False
+    return any(word in name for word in EXCHANGE_LABEL_KEYWORDS)
+
+
+def parse_config_labels(mapping):
+    """把 config 里 "链:地址" = "标签" 的写法解析成标签条目。"""
+    out = []
+    for key, value in (mapping or {}).items():
+        chain, address = split_ref(key)
+        if not chain or not address or address == "native":
+            continue
+        out.append(
+            {
+                "chain": chain,
+                "address": address,
+                "label": str(value),
+                "category": "exchange" if is_exchange_label(value, "") else "",
+                "source": "config",
+            }
+        )
+    return out
 
 
 def is_native_token(chain, token):
@@ -572,10 +634,39 @@ class BlockscoutAdapter(ChainAdapter):
             return self._native_transactions(address, limit)
         return self._token_transfers(token, address, limit)
 
-    def _tx_row(self, address, sender, receiver, value, asset, item):
+    @staticmethod
+    def _address_label(obj):
+        """从 Blockscout 的地址对象里取展示名和标签类别。
+
+        成交接口的 from/to 会带 metadata.tags，所以标签是随成交免费拿到的，
+        不需要为每个对手方再发一次请求。
+        """
+        if not isinstance(obj, dict):
+            return "", ()
+        name_tag = ""
+        protocol_tag = ""
+        tags = []
+        for tag in ((obj.get("metadata") or {}).get("tags") or []):
+            if not isinstance(tag, dict):
+                continue
+            tag_type = str(tag.get("tagType") or "")
+            tag_name = str(tag.get("name") or "")
+            slug = str(tag.get("slug") or "")
+            if tag_type == "name" and tag_name and not name_tag:
+                name_tag = tag_name
+            elif tag_type == "protocol" and tag_name and not protocol_tag:
+                protocol_tag = tag_name
+            if tag_type == "generic" and slug:
+                tags.append(slug.lower())
+        label = name_tag or str(obj.get("name") or "") or protocol_tag
+        return label, tuple(dict.fromkeys(tags))
+
+    def _tx_row(self, address, sender_obj, receiver_obj, value, asset, item):
+        sender = str((sender_obj or {}).get("hash") or "")
+        receiver = str((receiver_obj or {}).get("hash") or "")
         me = str(address).lower()
-        outgoing = str(sender).lower() == me
-        incoming = str(receiver).lower() == me
+        outgoing = sender.lower() == me
+        incoming = receiver.lower() == me
         if outgoing and incoming:
             direction = "self"
         elif outgoing:
@@ -583,6 +674,8 @@ class BlockscoutAdapter(ChainAdapter):
         else:
             direction = "in"
         tx_hash = str(item.get("transaction_hash") or item.get("hash") or "")
+        sender_label, sender_tags = self._address_label(sender_obj)
+        receiver_label, receiver_tags = self._address_label(receiver_obj)
         return {
             "hash": tx_hash,
             "time_ms": _parse_iso_ms(item.get("timestamp")),
@@ -591,6 +684,12 @@ class BlockscoutAdapter(ChainAdapter):
             "value": value,
             "asset": asset,
             "url": f"{self.base_url}/tx/{tx_hash}" if tx_hash else "",
+            "sender": sender,
+            "receiver": receiver,
+            "sender_label": sender_label,
+            "sender_tags": sender_tags,
+            "receiver_label": receiver_label,
+            "receiver_tags": receiver_tags,
         }
 
     def _token_transfers(self, token, address, limit):
@@ -611,8 +710,8 @@ class BlockscoutAdapter(ChainAdapter):
             rows.append(
                 self._tx_row(
                     address,
-                    str((item.get("from") or {}).get("hash") or ""),
-                    str((item.get("to") or {}).get("hash") or ""),
+                    item.get("from") or {},
+                    item.get("to") or {},
                     raw_to_units(total.get("value") or 0, decimals),
                     str(info.get("symbol") or token),
                     item,
@@ -635,8 +734,8 @@ class BlockscoutAdapter(ChainAdapter):
             rows.append(
                 self._tx_row(
                     address,
-                    str((item.get("from") or {}).get("hash") or ""),
-                    str((item.get("to") or {}).get("hash") or ""),
+                    item.get("from") or {},
+                    item.get("to") or {},
                     value,
                     symbols[0],
                     item,
@@ -1826,6 +1925,7 @@ class WhaleWatcher:
             return []
 
         self.store.save_whale_txs(chat_id, chain, token, address, rows, now_ms)
+        self._cache_tx_labels(chain, rows)
         newest = max(int(row.get("time_ms") or 0) for row in rows)
         previous = int(entry.get("last_tx_ms") or 0)
         if newest > 0:
@@ -1845,6 +1945,33 @@ class WhaleWatcher:
             return []
         fresh.sort(key=lambda row: int(row.get("time_ms") or 0))
         return [self._format_tx_alert(entry, fresh)]
+
+    def _cache_tx_labels(self, chain, rows):
+        """把成交响应里自带的地址标签存进库，供对手方分析使用。"""
+        entries = []
+        seen = set()
+        for row in rows:
+            for side in ("sender", "receiver"):
+                address = str(row.get(side) or "")
+                label = str(row.get(side + "_label") or "")
+                tags = row.get(side + "_tags") or ()
+                if not address:
+                    continue
+                key = address.lower()
+                if key in seen or (not label and not tags):
+                    continue
+                seen.add(key)
+                entries.append(
+                    {
+                        "chain": chain,
+                        "address": address,
+                        "label": label,
+                        "category": ",".join(str(item) for item in tags),
+                        "source": "blockscout",
+                    }
+                )
+        if entries:
+            self.store.upsert_address_labels(entries)
 
     @staticmethod
     def _format_tx_alert(entry, rows):
