@@ -1122,6 +1122,155 @@ class WebApp:
             "generated_at": int(time.time() * 1000),
         }
 
+    TX_WINDOWS = {
+        "24h": 24 * 3600 * 1000,
+        "3d": 3 * 24 * 3600 * 1000,
+        "7d": 7 * 24 * 3600 * 1000,
+        "30d": 30 * 24 * 3600 * 1000,
+        "90d": 90 * 24 * 3600 * 1000,
+    }
+
+    def whale_tx_analysis(self, asset=None, window="30d", chain=None,
+                          watched_address=None):
+        """按币种汇总一段时间内的转账，并聚合对手方。"""
+        window_ms = self.TX_WINDOWS.get(str(window or "30d"))
+        if window_ms is None:
+            raise ValueError(
+                "window 只支持 " + "、".join(sorted(self.TX_WINDOWS))
+            )
+        now_ms = int(time.time() * 1000)
+        since_ms = now_ms - window_ms
+        asset = str(asset or "").strip()
+        if not asset:
+            raise ValueError("需要指定代币符号")
+        chain_filter = str(chain).strip().lower() if chain else None
+        watched_filter = str(watched_address).strip() if watched_address else None
+        rows = self.store.whale_txs_in_range(
+            asset=asset,
+            chain=chain_filter,
+            watched_address=watched_filter,
+            since_ms=since_ms,
+            limit=5000,
+        )
+
+        ins = [r for r in rows if r["direction"] == "in"]
+        outs = [r for r in rows if r["direction"] == "out"]
+        selfs = [r for r in rows if r["direction"] == "self"]
+
+        # 按天分桶，供前端画趋势
+        daily = {}
+        for row in rows:
+            day = int((row["time"] or 0) // 86400000) * 86400000
+            bucket = daily.setdefault(
+                day, {"in": 0.0, "out": 0.0, "count": 0}
+            )
+            bucket["count"] += 1
+            if row["direction"] == "in":
+                bucket["in"] += float(row.get("value") or 0)
+            elif row["direction"] == "out":
+                bucket["out"] += float(row.get("value") or 0)
+        series = [
+            {"day": day, "in": b["in"], "out": b["out"], "count": b["count"]}
+            for day, b in sorted(daily.items())
+        ]
+
+        watched_breakdown = {}
+        for row in rows:
+            key = (str(row.get("address") or "").lower(), row.get("chain"))
+            item = watched_breakdown.setdefault(
+                key,
+                {
+                    "address": row.get("address"),
+                    "chain": row.get("chain"),
+                    "count": 0,
+                    "in": 0.0,
+                    "out": 0.0,
+                },
+            )
+            item["count"] += 1
+            if row["direction"] == "in":
+                item["in"] += float(row.get("value") or 0)
+            elif row["direction"] == "out":
+                item["out"] += float(row.get("value") or 0)
+
+        peers = self.store.whale_tx_counterparties(
+            asset=asset,
+            chain=chain_filter,
+            watched_address=watched_filter,
+            since_ms=since_ms,
+            limit=200,
+        )
+        # 同一个对手方把 in/out 合并一行，方便看净流。
+        peers_merged = {}
+        for peer in peers:
+            key = peer["counterparty"].lower()
+            item = peers_merged.setdefault(
+                key,
+                {
+                    "counterparty": peer["counterparty"],
+                    "in": {"count": 0, "value": 0.0},
+                    "out": {"count": 0, "value": 0.0},
+                    "first_ms": peer["first_ms"],
+                    "last_ms": peer["last_ms"],
+                    "chains": [],
+                    "watched_accounts": [],
+                },
+            )
+            bucket = item[peer["direction"]]
+            bucket["count"] += peer["count"]
+            bucket["value"] += peer["value"]
+            item["first_ms"] = min(item["first_ms"], peer["first_ms"])
+            item["last_ms"] = max(item["last_ms"], peer["last_ms"])
+            for c in peer["chains"]:
+                if c not in item["chains"]:
+                    item["chains"].append(c)
+            for a in peer["watched_accounts"]:
+                if a not in item["watched_accounts"]:
+                    item["watched_accounts"].append(a)
+        peer_rows = sorted(
+            peers_merged.values(),
+            key=lambda p: (
+                p["in"]["value"] + p["out"]["value"], p["in"]["count"] + p["out"]["count"]
+            ),
+            reverse=True,
+        )
+        for p in peer_rows:
+            p["net"] = p["in"]["value"] - p["out"]["value"]
+
+        # 最近交易也返回，最多 100 条。
+        recent = rows[:100]
+
+        return {
+            "type": "whale_tx_analysis",
+            "asset": asset,
+            "window": window,
+            "since_ms": since_ms,
+            "until_ms": now_ms,
+            "chain": str(chain).strip().lower() or None,
+            "watched_address": str(watched_address).strip() or None,
+            "summary": {
+                "count": len(rows),
+                "in_count": len(ins),
+                "out_count": len(outs),
+                "self_count": len(selfs),
+                "in_value": sum(float(r["value"] or 0) for r in ins),
+                "out_value": sum(float(r["value"] or 0) for r in outs),
+                "net_value": sum(float(r["value"] or 0) for r in ins)
+                - sum(float(r["value"] or 0) for r in outs),
+                "watched_count": len(watched_breakdown),
+                "peer_count": len(peer_rows),
+            },
+            "daily": series,
+            "watched": sorted(
+                watched_breakdown.values(),
+                key=lambda w: (w["in"] + w["out"]),
+                reverse=True,
+            ),
+            "counterparties": peer_rows[:50],
+            "recent": recent,
+            "generated_at": now_ms,
+        }
+
     def whale_mutate(self, kind, payload):
         """kind = watch | token，action = add | remove。"""
         action = str(payload.get("action") or "add").strip().lower()
@@ -1183,6 +1332,17 @@ class WebApp:
             now_ms,
         )
         return {"added": True}
+
+    def whale_tx_assets(self):
+        """一段时间内出现过的代币符号，供成交分析页选择。"""
+        return [
+            {
+                "asset": row["asset"],
+                "count": row["count"],
+                "last_ms": row["last_ms"],
+            }
+            for row in self.store.whale_tx_asset_summary(days=90)
+        ]
 
     def whale_tx_enabled(self):
         return self.settings_values().get("whale_monitor_transactions") == "1"
@@ -1321,6 +1481,18 @@ class WebRequestHandler(BaseHTTPRequestHandler):
                 )
             elif path == "/api/settings":
                 self._send_json(200, self.app.settings_data())
+            elif path == "/api/whale/tx/assets":
+                self._send_json(200, {"assets": self.app.whale_tx_assets()})
+            elif path == "/api/whale/tx/analysis":
+                self._send_json(
+                    200,
+                    self.app.whale_tx_analysis(
+                        asset=(query.get("asset") or [""])[0],
+                        window=(query.get("window") or ["30d"])[0],
+                        chain=(query.get("chain") or [""])[0],
+                        watched_address=(query.get("address") or [""])[0],
+                    ),
+                )
             elif path == "/api/whale":
                 self._send_json(200, self.app.whale_data())
             elif path == "/api/whale/search":

@@ -49,6 +49,10 @@
             <svg viewBox="0 0 24 24"><path d="M12 3l9 5-9 5-9-5z"/><path d="M3 13l9 5 9-5"/></svg>
             <span>链上筹码</span>
           </button>
+          <button class="nav-button" type="button" data-view="whale-tx">
+            <svg viewBox="0 0 24 24"><path d="M3 12h7M14 12h7M10 8l4 4-4 4"/></svg>
+            <span>成交分析</span>
+          </button>
           <button class="nav-button" type="button" data-view="settings">
             <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M12 2.5l1.4 2.1 2.4-.7.6 2.4 2.4.7-.7 2.4 2.1 1.4-2.1 1.4.7 2.4-2.4.7-.6 2.4-2.4-.7L12 21.5l-1.4-2.1-2.4.7-.6-2.4-2.4-.7.7-2.4L3.8 13l2.1-1.4-.7-2.4 2.4-.7.6-2.4 2.4.7z"/></svg>
             <span>设置</span>
@@ -261,7 +265,26 @@
           <div class="panel-state"></div>
           <div class="panel-body"></div>
         </section>
-        <section class="panel" data-panel="events">
+        <section class="panel" data-panel="whale-tx">
+          <div class="panel-head">
+            <div><h1>链上成交分析</h1><div class="panel-meta">被跟踪地址的转账统计与对手方网络</div></div>
+            <div class="chart-controls">
+              <select id="wta-asset" class="chart-select" aria-label="代币"></select>
+              <div class="segmented" id="wta-window">
+                <button type="button" data-window="24h">24时</button>
+                <button type="button" data-window="3d">3天</button>
+                <button type="button" data-window="7d">7天</button>
+                <button type="button" data-window="30d" class="active">30天</button>
+                <button type="button" data-window="90d">90天</button>
+              </div>
+              <button id="wta-refresh" class="chart-tool" type="button" title="重新分析">
+                <svg viewBox="0 0 24 24"><path d="M20 12a8 8 0 1 1-3-6"/><path d="M20 4v5h-5"/></svg>
+              </button>
+            </div>
+          </div>
+          <div class="panel-state"></div>
+          <div class="panel-body"></div>
+        </section>        <section class="panel" data-panel="events">
           <div class="panel-head">
             <div><h1>事件</h1><div class="panel-meta">本地监控记录</div></div>
           </div>

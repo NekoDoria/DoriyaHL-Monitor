@@ -14,6 +14,8 @@ const state = {
   whaleData: null,
   whaleScan: null,
   settingsData: null,
+  wtaAsset: localStorage.getItem("hl.wtaAsset") || "",
+  wtaWindow: "30d",
   settingsInputs: null,
   theme: null,
   overlays: { orders: true, fills: true, tpsl: true, volume: true, whaleOrders: false, whaleFills: false },
@@ -74,6 +76,9 @@ const els = {
   whaleCheck: document.getElementById("whale-check"),
   settingsSave: document.getElementById("settings-save"),
   settingsReset: document.getElementById("settings-reset"),
+  wtaAsset: document.getElementById("wta-asset"),
+  wtaWindow: document.getElementById("wta-window"),
+  wtaRefresh: document.getElementById("wta-refresh"),
   brandText: document.getElementById("brand-text"),
 };
 
@@ -2047,6 +2052,165 @@ async function saveSettings(reset = false) {
     button.disabled = false;
   }
 }
+// ---------------------------------------------------------------- 成交分析
+
+function renderWtaMetrics(summary) {
+  const metrics = make("div", "metrics");
+  const net = Number(summary.net_value) || 0;
+  metrics.append(
+    metric("总笔数", String(summary.count)),
+    metric("转入", `${summary.in_count} 笔 · ${formatAmount(summary.in_value)}`),
+    metric("转出", `${summary.out_count} 笔 · ${formatAmount(summary.out_value)}`),
+    metric("净流", signed(net, formatAmount), pnlClass(net)),
+    metric("对手方", String(summary.peer_count)),
+    metric("参与地址", String(summary.watched_count)),
+  );
+  return metrics;
+}
+
+function renderWtaDaily(series, asset) {
+  if (!series.length) return;
+  const card = make("div", "onchain-card");
+  card.append(make("div", "settings-title", "每日净流"));
+  const maxVal = Math.max(
+    ...series.map((row) => Math.max(row.in, row.out)), 1,
+  );
+  const wrap = make("div", "wta-bars");
+  for (const row of series.slice(-31)) {
+    const col = make("div", "wta-col");
+    const inBar = make("div", "wta-bar in");
+    inBar.style.height = `${Math.max(2, (row.in / maxVal) * 100)}%`;
+    const outBar = make("div", "wta-bar out");
+    outBar.style.height = `${Math.max(2, (row.out / maxVal) * 100)}%`;
+    const bars = make("div", "wta-bars-inner");
+    bars.append(inBar, outBar);
+    col.append(bars);
+    const label = make("div", "wta-col-label", new Date(row.day).toISOString().slice(5, 10));
+    label.title = `${label.textContent} · 转入 ${formatAmount(row.in)} · 转出 ${formatAmount(row.out)} · ${row.count} 笔`;
+    col.append(label);
+    wrap.append(col);
+  }
+  card.append(wrap);
+  const legend = make("div", "onchain-hint");
+  legend.append(make("span", "wta-legend-dot in", ""), make("span", "", "转入"));
+  legend.append(make("span", "wta-legend-dot out", ""), make("span", "", "转出"));
+  legend.append(make("span", "onchain-note", ` · ${asset}`));
+  card.append(legend);
+  return card;
+}
+
+function renderWta(data) {
+  const body = panel("whale-tx").querySelector(".panel-body");
+  body.replaceChildren();
+  const summary = data.summary || {};
+  if (!summary.count) {
+    body.append(make("div", "state-empty",
+      `${data.window} 内没有 ${data.asset} 的成交记录。监控地址出现新成交后这里会自动积累数据。`));
+    return;
+  }
+  body.append(renderWtaMetrics(summary));
+  const daily = renderWtaDaily(data.daily || [], data.asset);
+  if (daily) body.append(daily);
+
+  if ((data.watched || []).length > 1) {
+    body.append(sectionTitle("按监控地址拆分"));
+    body.append(table(
+      ["地址", "链", "笔数", "转入", "转出"],
+      data.watched.map((row) => [
+        addressCell(row.address),
+        cell(row.chain),
+        cell(String(row.count)),
+        cell(formatAmount(row.in)),
+        cell(formatAmount(row.out)),
+      ]),
+    ));
+  }
+
+  body.append(sectionTitle(`对手方（${data.counterparties.length}）`));
+  body.append(table(
+    ["对手方", "转入", "转出", "净流", "笔数", "链", "首次", "最近"],
+    (data.counterparties || []).map((row) => {
+      const net = Number(row.net) || 0;
+      const inV = Number(row["in"].value) || 0;
+      const outV = Number(row["out"].value) || 0;
+      const inCell = cell(inV ? formatAmount(inV) : "—");
+      inCell.title = `${row["in"].count} 笔`;
+      const outCell = cell(outV ? formatAmount(outV) : "—");
+      outCell.title = `${row["out"].count} 笔`;
+      return [
+        addressCell(row.counterparty),
+        inCell,
+        outCell,
+        cell(signed(net, formatAmount), pnlClass(net)),
+        cell(String(row["in"].count + row["out"].count)),
+        cell((row.chains || []).join(", ")),
+        cell(timeText(row.first_ms, false)),
+        cell(timeText(row.last_ms, false)),
+      ];
+    }),
+  ));
+
+  if ((data.recent || []).length) {
+    body.append(sectionTitle(`明细（最近 ${data.recent.length} 笔）`));
+    body.append(table(
+      ["时间", "我方地址", "方向", "数量", "对手方", "交易"],
+      data.recent.map((row) => {
+        const link = make("a", "tx-link", shortAddress(row.hash || ""));
+        link.href = row.url || "#";
+        link.target = "_blank";
+        link.rel = "noreferrer";
+        const action = make("td");
+        action.append(link);
+        return [
+          cell(timeText(row.time)),
+          addressCell(row.address),
+          cell(TX_DIRECTION_LABELS[row.direction] || "交易", row.direction === "in" ? "positive" : row.direction === "out" ? "negative" : ""),
+          cell(qty.format(Number(row.value) || 0)),
+          addressCell(row.counterparty || "—"),
+          action,
+        ];
+      }),
+    ));
+  }
+}
+
+async function loadWta() {
+  const asset = els.wtaAsset.value;
+  if (!asset) {
+    showState("whale-tx", "empty", "还没有抓到任何成交，等监控地址出现新交易后再来。");
+    return;
+  }
+  setStateLoading("whale-tx");
+  try {
+    const data = await request(
+      `/api/whale/tx/analysis?asset=${encodeURIComponent(asset)}&window=${encodeURIComponent(state.wtaWindow)}`,
+    );
+    clearState("whale-tx");
+    renderWta(data);
+    setUpdatedAt(data.generated_at);
+  } catch (error) {
+    showState("whale-tx", "error", apiErrorText(error));
+  }
+}
+
+async function loadWtaAssets() {
+  try {
+    const data = await request("/api/whale/tx/assets");
+    const select = els.wtaAsset;
+    const wanted = state.wtaAsset;
+    select.replaceChildren();
+    for (const item of data.assets || []) {
+      const option = make("option", "", `${item.asset}（${item.count} 笔）`);
+      option.value = item.asset;
+      select.append(option);
+    }
+    const values = [...select.children].map((node) => node.value);
+    state.wtaAsset = values.includes(wanted) ? wanted : (values[0] || "");
+    select.value = state.wtaAsset;
+  } catch (error) {
+    showState("whale-tx", "error", apiErrorText(error));
+  }
+}
 function renderWhale(data) {
   if (data) state.whaleData = data;
   const info = state.whaleData;
@@ -2137,6 +2301,10 @@ function renderView(view, data) {
     renderWhale(data);
     return;
   }
+  if (view === "whale-tx") {
+    renderWta(data);
+    return;
+  }
   if (view === "settings") {
     renderSettings(data);
     return;
@@ -2168,6 +2336,7 @@ function endpoint(view) {
   if (view === "history") return `/api/history?address=${address}`;
   if (view === "autohunt") return "/api/autohunt";
   if (view === "whale") return "/api/whale";
+  if (view === "whale-tx") return "/api/whale/tx/analysis?asset=" + encodeURIComponent(state.wtaAsset) + "&window=" + encodeURIComponent(state.wtaWindow);
   if (view === "settings") return "/api/settings";
   return `/api/events?address=${address}&limit=100`;
 }
@@ -2191,7 +2360,11 @@ function setView(view) {
 async function loadView(force = false) {
   if (state.busy) return;
   const view = state.view;
-  if (view !== "whale" && view !== "settings" && !state.selected) {
+  if (["whale", "whale-tx", "settings"].includes(view)) {
+    if (view === "whale-tx" && !els.wtaAsset.children.length) {
+      await loadWtaAssets();
+    }
+  } else if (!state.selected) {
     showState(view, "empty", "暂无账户");
     return;
   }
@@ -2400,6 +2573,21 @@ document.addEventListener("fullscreenchange", () => {
 });
 
 els.refresh.addEventListener("click", () => loadView(true));
+els.wtaRefresh.addEventListener("click", loadWta);
+els.wtaAsset.addEventListener("change", () => {
+  state.wtaAsset = els.wtaAsset.value;
+  localStorage.setItem("hl.wtaAsset", state.wtaAsset);
+  loadWta();
+});
+els.wtaWindow.addEventListener("click", (event) => {
+  const button = event.target.closest("button");
+  if (!button) return;
+  state.wtaWindow = button.dataset.window;
+  for (const node of els.wtaWindow.querySelectorAll("button")) {
+    node.classList.toggle("active", node === button);
+  }
+  loadWta();
+});
 els.settingsSave.addEventListener("click", () => saveSettings(false));
 els.settingsReset.addEventListener("click", () => saveSettings(true));
 els.whaleScan.addEventListener("click", runWhaleScan);

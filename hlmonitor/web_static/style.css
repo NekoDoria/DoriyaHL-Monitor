@@ -586,3 +586,24 @@ button:focus-visible, input:focus-visible { outline: 2px solid var(--accent); ou
 .whalefill-zone.long .zone-label { color: rgba(196,221,255,.68); }
 .whalefill-zone.short .zone-label { color: rgba(226,206,255,.68); }
 .whalefill-zone.active { background-color: rgba(145,185,255,.18); }
+
+/* 链上成交分析 */
+.wta-bars {
+  display: flex; align-items: flex-end; gap: 4px; height: 140px;
+  padding: 8px 0 4px; overflow-x: auto;
+}
+.wta-col { display: grid; gap: 3px; flex: 0 0 auto; width: 34px; text-align: center; }
+.wta-bars-inner {
+  display: flex; align-items: flex-end; justify-content: center;
+  gap: 2px; height: 110px;
+}
+.wta-bar { width: 12px; border-radius: 2px 2px 0 0; min-height: 2px; }
+.wta-bar.in { background: rgba(56,209,167,.65); }
+.wta-bar.out { background: rgba(255,122,122,.55); }
+.wta-col-label { color: var(--muted); font-size: 10px; white-space: nowrap; }
+.wta-legend-dot {
+  display: inline-block; width: 9px; height: 9px; border-radius: 2px;
+  margin-right: 4px; vertical-align: middle;
+}
+.wta-legend-dot.in { background: rgba(56,209,167,.65); }
+.wta-legend-dot.out { background: rgba(255,122,122,.55); }
