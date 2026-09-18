@@ -1169,6 +1169,124 @@ class BlockchairAdapter(ChainAdapter):
         ]
 
 
+# Esplora / mempool.space 风格的 UTXO 数据源（免密钥，限额比 Blockchair 宽松）。
+# chain -> (展示名, 符号, 最小单位, 默认地址)
+ESPLORA_CHAINS = {
+    "bitcoin": ("Bitcoin", "BTC", 8, "https://blockstream.info"),
+    "litecoin": ("Litecoin", "LTC", 8, "https://litecoinspace.org"),
+}
+
+
+class EsploraAdapter(ChainAdapter):
+    """余额和成交走 Esplora，持仓榜仍委托 Blockchair。
+
+    Esplora 一次请求就返回完整的 vin/vout（含地址和金额），
+    比 Blockchair 少一次批量详情请求，且没有 API key 和 IP 级严格限流。
+    它没有富豪榜，所以扫描仍交给 Blockchair，只在手动扫描时才用到。
+    """
+
+    kind = "utxo"
+
+    def __init__(
+        self, chain, name, symbol, decimals, base_url, client, scan_adapter=None
+    ):
+        super().__init__(chain, name, client)
+        self.symbol = symbol
+        self.decimals = int(decimals)
+        self.base_url = str(base_url).rstrip("/")
+        self.scan_adapter = scan_adapter
+        self._native_meta = None
+
+    def token_url(self, token):
+        return self.base_url
+
+    def address_url(self, token, address):
+        return f"{self.base_url}/address/{address}"
+
+    def supports_scan(self):
+        return self.scan_adapter is not None
+
+    def supports_transactions(self):
+        return True
+
+    def fetch_token_meta(self, token):
+        if self.scan_adapter is not None:
+            return self.scan_adapter.fetch_token_meta(token)
+        if self._native_meta is None:
+            self._native_meta = TokenMeta(
+                symbol=self.symbol,
+                name=self.name,
+                decimals=self.decimals,
+                kind="native",
+            )
+        return self._native_meta
+
+    def fetch_top_holders(self, token, limit=50, decimals=None):
+        if self.scan_adapter is None:
+            raise DataSourceError(f"{self.name} 当前数据源没有持仓榜接口")
+        return self.scan_adapter.fetch_top_holders(
+            token, limit=limit, decimals=decimals
+        )
+
+    def fetch_balance(self, token, address, decimals=None):
+        data = self.client.get_json(f"{self.base_url}/api/address/{address}")
+        total = 0.0
+        for key in ("chain_stats", "mempool_stats"):
+            stats = (data or {}).get(key) or {}
+            total += _as_float(stats.get("funded_txo_sum"))
+            total -= _as_float(stats.get("spent_txo_sum"))
+        return raw_to_units(max(0.0, total), self.decimals)
+
+    def fetch_transactions(self, token, address, limit=20):
+        limit = max(1, min(50, int(limit)))
+        data = self.client.get_json(f"{self.base_url}/api/address/{address}/txs")
+        rows = [
+            self._tx_row(address, tx)
+            for tx in (data or [])
+            if isinstance(tx, dict)
+        ]
+        rows.sort(key=lambda row: row["time_ms"], reverse=True)
+        return rows[:limit]
+
+    def _tx_row(self, address, tx):
+        me = str(address).lower()
+        received = 0.0
+        sent = 0.0
+        peer = ""
+        for out in tx.get("vout") or []:
+            who = str(out.get("scriptpubkey_address") or "")
+            if who.lower() == me:
+                received += raw_to_units(out.get("value") or 0, self.decimals)
+            elif who and not peer:
+                peer = who
+        for vin in tx.get("vin") or []:
+            prev = vin.get("prevout") or {}
+            who = str(prev.get("scriptpubkey_address") or "")
+            if who.lower() == me:
+                sent += raw_to_units(prev.get("value") or 0, self.decimals)
+            elif who and not peer:
+                peer = who
+        if received and sent:
+            direction = "self"
+        elif sent:
+            direction = "out"
+        else:
+            direction = "in"
+        txid = str(tx.get("txid") or "")
+        block_time = (tx.get("status") or {}).get("block_time")
+        return {
+            "hash": txid,
+            # 未确认交易没有 block_time，记为 0：明细里能看到，
+            # 但不参与告警游标（确认后拿到时间才会告警）。
+            "time_ms": int(block_time) * 1000 if block_time else 0,
+            "direction": direction,
+            "counterparty": peer,
+            "value": abs(received - sent) if (received or sent) else 0.0,
+            "asset": self.symbol,
+            "url": f"{self.base_url}/tx/{txid}" if txid else "",
+        }
+
+
 class EvmRpcAdapter(ChainAdapter):
     """只提供 JSON-RPC 的 EVM 链：可做余额监控，但没有免费持仓榜。"""
 
@@ -1297,6 +1415,25 @@ def build_adapters(whale_cfg, proxy_url=None):
         name, symbol, decimals = spec
         adapters[chain] = BlockchairAdapter(
             chain, name, symbol, decimals, blockchair_url, client, blockchair_key
+        )
+
+    # 有 Esplora 源的链改成走 Esplora（余额 + 成交），持仓榜仍委托 Blockchair。
+    # 在 [whales] esplora_sources 里把某条链设成空串即可关闭，退回 Blockchair。
+    esplora_sources = dict(getattr(whale_cfg, "esplora_sources", None) or {})
+    for chain, (name, symbol, decimals, default_url) in ESPLORA_CHAINS.items():
+        if chain in disabled:
+            continue
+        base_url = str(esplora_sources.get(chain, default_url) or "").strip()
+        if not base_url:
+            continue
+        adapters[chain] = EsploraAdapter(
+            chain,
+            name,
+            symbol,
+            decimals,
+            base_url,
+            client,
+            scan_adapter=adapters.get(chain),
         )
     return adapters
 

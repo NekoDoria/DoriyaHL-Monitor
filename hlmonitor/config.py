@@ -105,6 +105,7 @@ class WhaleConfig:
     blockchair_url: str = "https://api.blockchair.com"
     blockchair_key: str = ""              # 可选，提高 Blockchair 额度
     blockchair_chains: list = field(default_factory=list)
+    esplora_sources: dict = field(default_factory=dict)  # 链 -> Esplora 地址，置空可关闭
     chain_urls: dict = field(default_factory=dict)   # chain -> 自定义 API 地址
     disabled_chains: list = field(default_factory=list)
     exclude_tags: list = field(default_factory=list)      # 额外排除的地址标签
@@ -323,6 +324,10 @@ def load_config(path: str | os.PathLike | None = None) -> Config:
         ),
         blockchair_key=str(whales_data.get("blockchair_key", "") or "").strip(),
         blockchair_chains=blockchair_chains,
+        esplora_sources={
+            str(key).lower(): str(value).strip()
+            for key, value in (whales_data.get("esplora_sources") or {}).items()
+        },
         chain_urls=chain_urls,
         disabled_chains=[
             str(item).lower()

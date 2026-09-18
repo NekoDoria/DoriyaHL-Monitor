@@ -167,7 +167,28 @@ python -m hlmonitor --get-chat-id
 
 被跟踪地址的转入/转出会被记录成明细，包含方向、对手方、数量、时间和区块浏览器链接。首次检查只建立基线，之后出现新成交才会告警，避免把历史记录一次性推完。
 
-数据来源与持仓榜一致：EVM 链走 Blockscout，UTXO 链走 Blockchair。**HyperEVM 目前没有免费的成交接口，只做余额监控。**
+数据来源：EVM 链走 Blockscout；UTXO 链的余额和成交走 **Esplora 风格的全节点 API**（Bitcoin 用 blockstream.info、Litecoin 用 litecoinspace.org），免密钥、限额比 Blockchair 宽松得多，而且一次请求就能拿到完整的 vin/vout，不需要再补一次交易详情。**HyperEVM 目前没有免费的成交接口，只做余额监控。**
+
+### UTXO 链的数据源选择
+
+Blockchair 是第三方索引器，免费额度按 IP 算，容易被限流。所以 UTXO 链拆成了两条路径：
+
+| 用途 | 数据源 | 频率 |
+| --- | --- | --- |
+| 余额 + 成交监控 | Esplora（blockstream.info / litecoinspace.org） | 每轮都调，所以用限额宽松的 |
+| 持仓集中度扫描 | Blockchair | 只在手动 `/whale scan` 时调用 |
+
+Esplora 没有富豪榜，所以扫描仍需要 Blockchair，但那是一次性的手动操作，不影响日常监控。
+
+想换成自己的节点或自建 Esplora 实例：
+
+```toml
+[whales]
+# 换成自己的 mempool.space / Esplora；把某条链设成空串则退回 Blockchair
+esplora_sources = { bitcoin = "http://127.0.0.1:3000", litecoin = "" }
+```
+
+**Zcash / Dogecoin / Dash 目前没有免费可用的 Esplora 实例**（Zcash 的 zcha.in API 已经下线，其余候选要么 404 要么证书失效），所以这三条链的监控仍然走 Blockchair。要彻底摆脱限流只有两条路：配 `blockchair_key`，或者自建节点（Zcash 用 `zebrad` 的地址索引，Bitcoin 用 `electrs` / `Fulcrum` 起一个 Esplora）。
 
 成交监控的请求量和余额检查相当（每地址每轮 1～2 次），如果数据源开始限流，可以把 `watch_interval_minutes` 调大，或者在设置页直接关掉成交监控。
 

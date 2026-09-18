@@ -78,7 +78,13 @@ retries = 2                       # 外部请求重试次数
 # 留空则不启用 Solana。
 # solana_rpc = "https://mainnet.helius-rpc.com/?api-key=..."
 
+# UTXO 链的余额与成交默认走 Esplora 风格的全节点 API（免密钥、限额宽松，
+# 一次请求就返回完整 vin/vout）：bitcoin=blockstream.info，litecoin=litecoinspace.org。
+# 这里可以换成自己的 mempool.space / Esplora 实例；把某条链设成空串则退回 Blockchair。
+# esplora_sources = { bitcoin = "https://mempool.space", litecoin = "" }
+
 # Blockchair 免费额度有限，共享出口 IP 容易被临时拉黑。
+# Esplora 没有富豪榜，所以持仓集中度扫描仍然要用 Blockchair，但那只在手动扫描时调用。
 # 如果经常遇到限流，可以填 API key 或只保留需要的链。
 # blockchair_key = ""
 # blockchair_chains = ["bitcoin", "zcash", "litecoin"]
