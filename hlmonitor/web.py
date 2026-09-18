@@ -529,17 +529,21 @@ class WebApp:
             "whale_process": "",
             "whale_account_count": 0,
             "whale_zones": [],
+            "whale_order_zones": [],
+            "whale_fill_zones": [],
         }
         if whale:
             try:
-                whale_data = self.whale_zones(proc, coin, merge)
+                whale_data = self.whale_zones(proc, coin, merge, fill_window_min)
             except Exception as exc:
                 print(f"[web] whale zones failed: {exc}")
                 whale_data = None
             if whale_data:
                 result["whale_process"] = whale_data["process"]
                 result["whale_account_count"] = whale_data["account_count"]
-                result["whale_zones"] = whale_data["zones"]
+                result["whale_zones"] = whale_data["order_zones"]
+                result["whale_order_zones"] = whale_data["order_zones"]
+                result["whale_fill_zones"] = whale_data["fill_zones"]
         if fills_ok:
             self.chart_cache[cache_key] = (time.monotonic(), result)
         return result
@@ -611,7 +615,7 @@ class WebApp:
             "collected": self.store.get_collected_accounts(),
             "generated_at": now_ms,
         }
-    def whale_zones(self, proc_name, coin, merge=1.0):
+    def whale_zones(self, proc_name, coin, merge=1.0, fill_window_min=1440):
         """聚合 autohunt 收集账户在该币种上的普通挂单区间。"""
         configs = self.store.all_autohunt_configs()
         if not configs:
@@ -624,7 +628,7 @@ class WebApp:
         name = picked["name"]
         chat_id = picked["chat_id"]
 
-        cache_key = (name, coin, round(float(merge), 3))
+        cache_key = (name, coin, round(float(merge), 3), int(fill_window_min))
         cached = self.whale_cache.get(cache_key)
         if cached and time.monotonic() - cached[0] < self.whale_cache_ttl:
             return cached[1]
@@ -642,8 +646,12 @@ class WebApp:
         if not dexes:
             dexes.add("")
 
+        now_ms = int(time.time() * 1000)
+        fill_start = now_ms - max(60, int(fill_window_min)) * 60_000
+
         def fetch(address):
-            collected = []
+            collected_orders = []
+            collected_fills = []
             for dex in sorted(dexes):
                 try:
                     orders = (
@@ -652,14 +660,24 @@ class WebApp:
                         else api.frontend_open_orders(address, dex)
                     )
                 except Exception:
-                    continue
-                collected.extend(orders or [])
-            return collected
+                    orders = []
+                collected_orders.extend(orders or [])
+
+            try:
+                collected_fills = api.user_fills_by_time(address, fill_start, now_ms + 1000) or []
+            except Exception:
+                collected_fills = []
+            return collected_orders, collected_fills
 
         flat = []
+        fill_flat = []
         if addresses:
             with concurrent.futures.ThreadPoolExecutor(max_workers=min(8, len(addresses))) as pool:
-                for address, orders in zip(addresses, pool.map(fetch, addresses)):
+                for address, result in zip(addresses, pool.map(fetch, addresses)):
+                    orders, account_fills = result
+                    for fill in account_fills or []:
+                        fill["_account"] = address
+                        fill_flat.append(fill)
                     for order in orders:
                         if order.get("isTrigger") or order.get("isPositionTpsl"):
                             continue
@@ -699,12 +717,82 @@ class WebApp:
                     "total_value": stats["total_value"],
                 }
             )
+        fill_groups = {}
+        for fill in fill_flat:
+            raw_coin = str(fill.get("coin") or "")
+            symbol = raw_coin.rsplit(":", 1)[-1].upper() if ":" in raw_coin else raw_coin.upper()
+            if symbol != str(coin).upper():
+                continue
+            side = str(fill.get("side") or "").upper()
+            direction = str(fill.get("dir") or "")
+            try:
+                px = float(fill.get("px") or 0)
+                size = float(fill.get("sz") or 0)
+            except (TypeError, ValueError):
+                continue
+            if side not in {"B", "A"} or px <= 0 or size <= 0:
+                continue
+            item = dict(fill)
+            item["_px"] = px
+            item["_account"] = address
+            item["_size"] = size
+            fill_groups.setdefault((side, direction), []).append(item)
+
+        fill_zones = []
+        for (side, direction), group in fill_groups.items():
+            group = sorted(group, key=lambda row: row["_px"])
+            clusters = []
+            current = []
+            for row in group:
+                px = row["_px"]
+                if current:
+                    last_px = current[-1]["_px"]
+                    first_px = current[0]["_px"]
+                    gap_pct = (px - last_px) / last_px * 100 if last_px else 0
+                    width_pct = (px - first_px) / first_px * 100 if first_px else 0
+                    if gap_pct > 0.25 * merge or width_pct > 0.75 * merge:
+                        clusters.append(current)
+                        current = []
+                current.append(row)
+            if current:
+                clusters.append(current)
+
+            for cluster in clusters:
+                prices = [row["_px"] for row in cluster]
+                sizes = [row["_size"] for row in cluster]
+                total_size = sum(sizes)
+                total_value = sum(p * s for p, s in zip(prices, sizes))
+                accounts_in = {str(row.get("_account") or "") for row in cluster}
+                if len(cluster) < 3 and len(accounts_in) < 2 and total_value < 200_000:
+                    continue
+                dir_counts = {direction: len(cluster)}
+                fill_zones.append(
+                    {
+                        "kind": "whale_fill",
+                        "side": "买入" if side == "B" else "卖出",
+                        "side_raw": side,
+                        "dir": direction,
+                        "dir_counts": dir_counts,
+                        "count": len(cluster),
+                        "accounts": len(accounts_in),
+                        "min_px": min(prices),
+                        "max_px": max(prices),
+                        "avg_px": total_value / total_size if total_size else (min(prices) + max(prices)) / 2,
+                        "total_sz": total_size,
+                        "total_value": total_value,
+                        "last_time": max(int(row.get("time") or 0) for row in cluster),
+                    }
+                )
+        fill_zones.sort(key=lambda item: (item["accounts"], item["total_value"]), reverse=True)
+        fill_zones = fill_zones[:30]
         rows.sort(key=lambda item: (item["accounts"], item["total_value"]), reverse=True)
         rows = rows[:20]
         result = {
             "process": name,
             "account_count": len(addresses),
             "zones": rows,
+            "order_zones": rows,
+            "fill_zones": fill_zones,
         }
         self.whale_cache[cache_key] = (time.monotonic(), result)
         return result
@@ -879,8 +967,9 @@ class WebApp:
 
     def whale_data(self):
         whales = self.config.whales
-        watches = self.store.get_whale_watches(chat_id=self.web_chat_id)
-        tokens = self.store.get_whale_tokens(chat_id=self.web_chat_id)
+        # 展示所有聊天订阅的并集；chat_ids 保留下来供操作定位。
+        watches = self.store.all_whale_watches_merged()
+        tokens = self.store.all_whale_tokens_merged()
         return {
             "type": "whale",
             "enabled": bool(whales.enabled),
@@ -897,12 +986,13 @@ class WebApp:
                     "checked_ms": row["last_checked_ms"],
                     "interval_minutes": round(row["interval_s"] / 60.0, 1),
                     "min_delta_pct": row["min_delta_pct"],
+                "chat_ids": row["chat_ids"],
                     "last_tx_ms": row["last_tx_ms"],
                     "tx_error": row["tx_error"],
                 }
                 for row in watches
             ],
-            "transactions": self.store.recent_whale_txs(self.web_chat_id, 40),
+            "transactions": self.store.recent_whale_txs(None, 40),
             "monitor_transactions": self.whale_tx_enabled(),
             "tokens": [
                 {
@@ -915,6 +1005,7 @@ class WebApp:
                     "scanned_ms": row["last_scan_ms"],
                     "error": row["last_error"],
                     "interval_hours": round(row["interval_s"] / 3600.0, 2),
+                    "chat_ids": row["chat_ids"],
                 }
                 for row in tokens
             ],
@@ -1046,7 +1137,11 @@ class WebApp:
                 raise ValueError("缺少地址")
             if action == "remove":
                 removed = self.store.remove_whale_watch(
-                    self.web_chat_id, chain, token, address
+                    self.web_chat_id,
+                    chain,
+                    token,
+                    address,
+                    all_chats=bool(payload.get("all_chats")),
                 )
                 return {"removed": bool(removed)}
             whales = self.config.whales
@@ -1068,7 +1163,12 @@ class WebApp:
             return {"added": True}
 
         if action == "remove":
-            removed = self.store.remove_whale_token(self.web_chat_id, chain, token)
+            removed = self.store.remove_whale_token(
+                self.web_chat_id,
+                chain,
+                token,
+                all_chats=bool(payload.get("all_chats")),
+            )
             return {"removed": bool(removed)}
         whales = self.config.whales
         self.store.upsert_whale_token(
@@ -1120,9 +1220,7 @@ class WebApp:
                 if not chain or not address:
                     raise ValueError("targets 每一项都需要 chain 和 address")
                 wanted.add((chain, token, address))
-        self._holder_watcher().check_addresses(
-            force=True, chat_id=self.web_chat_id, targets=wanted
-        )
+        self._holder_watcher().check_addresses(force=True, targets=wanted)
         return self.whale_data()
 
     def whale_rescan(self, chain, token):
@@ -1131,9 +1229,7 @@ class WebApp:
         token = str(token or "").strip()
         if not chain or not token:
             raise ValueError("缺少链或代币")
-        self._holder_watcher().check_tokens(
-            force=True, chat_id=self.web_chat_id, tokens={(chain, token)}
-        )
+        self._holder_watcher().check_tokens(force=True, tokens={(chain, token)})
         return self.whale_data()
 
 

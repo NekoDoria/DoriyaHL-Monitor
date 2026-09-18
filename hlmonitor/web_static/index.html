@@ -78,6 +78,8 @@
       </div>
     </aside>
 
+    <div id="sidebar-backdrop" class="sidebar-backdrop" hidden aria-hidden="true"></div>
+
     <main class="main">
       <header class="topbar">
         <button id="sidebar-toggle" class="icon-button" aria-label="切换侧栏">
@@ -188,14 +190,24 @@
               </div>
               <aside class="chart-side">
                 <div class="chart-side-head">区间叠加</div>
-                <div id="chart-overlays" class="overlay-toggles">
-                  <button type="button" data-overlay="orders" class="active">挂单区间</button>
-                  <button type="button" data-overlay="fills" class="active">成交区间</button>
-                  <button type="button" data-overlay="tpsl" class="active">止盈止损</button>
-                  <button type="button" data-overlay="volume" class="active">成交量</button>
-                  <button type="button" data-overlay="whale">Autohunt 区间</button>
-                </div>
-                <div class="fill-window-control">
+                <div id="chart-overlays" class="overlay-groups">
+                  <div class="overlay-group">
+                    <div class="overlay-group-head">基础区间</div>
+                    <div class="overlay-toggles">
+                      <button type="button" data-overlay="orders" class="active">挂单区间</button>
+                      <button type="button" data-overlay="fills" class="active">成交区间</button>
+                      <button type="button" data-overlay="tpsl" class="active">止盈止损</button>
+                      <button type="button" data-overlay="volume" class="active">成交量</button>
+                    </div>
+                  </div>
+                  <div class="overlay-group autohunt-group">
+                    <div class="overlay-group-head"><span>Autohunt</span><span id="autohunt-process">未加载</span></div>
+                    <div class="overlay-toggles">
+                      <button type="button" data-overlay="whaleOrders">挂单区间</button>
+                      <button type="button" data-overlay="whaleFills">成交区间</button>
+                    </div>
+                  </div>
+                </div>                <div class="fill-window-control">
                   <div class="merge-head"><span>成交区间回看</span><span id="fill-window-value">1天</span></div>
                   <select id="chart-fill-window" class="chart-select fill-window-select" aria-label="成交区间回看窗口"></select>
                   <div class="merge-scale"><span>K 线周期与回看窗口互相独立</span></div>

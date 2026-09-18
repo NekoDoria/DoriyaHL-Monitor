@@ -119,6 +119,11 @@ button:focus-visible, input:focus-visible { outline: 2px solid var(--accent); ou
   .app { display: block; }
   .sidebar { position: fixed; z-index: 10; inset: 0 auto 0 0; width: min(84vw,320px); transform: translateX(-100%); transition: transform .24s ease; box-shadow: 0 0 60px rgba(0,0,0,.5); }
   .sidebar.open { transform: translateX(0); }
+  .sidebar-backdrop {
+    position: fixed; inset: 0; z-index: 9; display: block;
+    background: rgba(0,0,0,.48); backdrop-filter: blur(2px);
+  }
+  .sidebar-backdrop[hidden] { display: none !important; }
   #sidebar-toggle { display: grid; }
   .topbar { padding: 0 14px; gap: 10px; }
   .updated-at { display: none; }
@@ -558,3 +563,26 @@ button:focus-visible, input:focus-visible { outline: 2px solid var(--accent); ou
 .account-source.telegram { color: #9ecbff; background: rgba(110,170,255,.16); }
 .account-source.both { color: #ffd79a; background: rgba(255,184,107,.18); }
 .account-source.web { color: #8df0cd; background: rgba(56,209,167,.14); }
+.overlay-groups { display: grid; gap: 10px; }
+.overlay-group {
+  display: grid; gap: 7px; padding: 10px;
+  border: 1px solid var(--border); border-radius: 9px; background: #202020;
+}
+.overlay-group-head {
+  display: flex; align-items: center; justify-content: space-between; gap: 8px;
+  color: var(--muted); font-size: 11px; font-weight: 700; text-transform: uppercase;
+}
+.overlay-group-head span:last-child {
+  color: #d8d8d8; font-size: 11px; font-weight: 650;
+  max-width: 125px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.overlay-group.autohunt-group { border-color: rgba(110,170,255,.34); background: rgba(110,170,255,.05); }
+.overlay-group.autohunt-group .overlay-group-head { color: rgba(150,185,255,.82); }
+.overlay-group.autohunt-group .overlay-toggles button.active {
+  color: #d8e6ff; border-color: rgba(110,170,255,.58); background: rgba(110,170,255,.12);
+}
+.whalefill-zone.long { background: rgba(110,170,255,.11); border: 1px dashed rgba(110,170,255,.56); }
+.whalefill-zone.short { background: rgba(184,140,255,.11); border: 1px dashed rgba(184,140,255,.56); }
+.whalefill-zone.long .zone-label { color: rgba(196,221,255,.68); }
+.whalefill-zone.short .zone-label { color: rgba(226,206,255,.68); }
+.whalefill-zone.active { background-color: rgba(145,185,255,.18); }

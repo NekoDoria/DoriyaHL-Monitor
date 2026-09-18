@@ -697,6 +697,54 @@ class EventStore:
                 )
             self.conn.commit()
 
+    @staticmethod
+    def merge_whale_rows(rows, key_fields):
+        """把不同 chat_id 里的同一目标合并成一行。
+
+        网页面板展示的是并集，但告警仍按各自的 chat_id 发送，
+        所以这里保住 chat_ids 列表；监控参数取最严格的一组。
+        """
+        merged = {}
+        for row in rows:
+            key = tuple(str(row.get(field) or "") for field in key_fields)
+            item = merged.get(key)
+            if item is None:
+                item = dict(row)
+                item["chat_ids"] = [str(row.get("chat_id") or "")]
+                merged[key] = item
+                continue
+            chat_id = str(row.get("chat_id") or "")
+            if chat_id not in item["chat_ids"]:
+                item["chat_ids"].append(chat_id)
+            if str(row.get("label") or "") and not item.get("label"):
+                item["label"] = row["label"]
+            if str(row.get("symbol") or "") and not item.get("symbol"):
+                item["symbol"] = row["symbol"]
+            for field in ("min_delta_pct", "min_delta_abs", "interval_s"):
+                value = row.get(field)
+                if field in row and value is not None:
+                    if item.get(field) is None:
+                        item[field] = value
+                    elif field == "interval_s":
+                        item[field] = min(item[field], value)
+                    else:
+                        item[field] = max(item[field], value)
+        return list(merged.values())
+
+    def all_whale_watches_merged(self, enabled_only=True):
+        """所有聊天订阅的监控地址，按目标合并后的并集。"""
+        return self.merge_whale_rows(
+            self.get_whale_watches(chat_id=None, enabled_only=enabled_only),
+            ("chain", "token", "address"),
+        )
+
+    def all_whale_tokens_merged(self, enabled_only=True):
+        """所有聊天订阅的代币，按目标合并后的并集。"""
+        return self.merge_whale_rows(
+            self.get_whale_tokens(chat_id=None, enabled_only=enabled_only),
+            ("chain", "token"),
+        )
+
     def mark_whale_watch_tx(
         self,
         chat_id,
@@ -911,13 +959,21 @@ class EventStore:
             )
             self.conn.commit()
 
-    def remove_whale_watch(self, chat_id, chain, token, address):
+    def remove_whale_watch(self, chat_id, chain, token, address, all_chats=False):
+        """删除监控地址；all_chats 时忽略 chat_id，供网页并集操作使用。"""
         with self._lock:
-            cur = self.conn.execute(
-                "DELETE FROM whale_watches WHERE chat_id = ? AND chain = ?"
-                " AND token = ? AND address = ?",
-                (str(chat_id), str(chain), str(token), str(address)),
-            )
+            if all_chats:
+                cur = self.conn.execute(
+                    "DELETE FROM whale_watches WHERE chain = ? AND token = ?"
+                    " AND address = ?",
+                    (str(chain), str(token), str(address)),
+                )
+            else:
+                cur = self.conn.execute(
+                    "DELETE FROM whale_watches WHERE chat_id = ? AND chain = ?"
+                    " AND token = ? AND address = ?",
+                    (str(chat_id), str(chain), str(token), str(address)),
+                )
             self.conn.commit()
         return cur.rowcount > 0
 
@@ -1011,12 +1067,19 @@ class EventStore:
             )
             self.conn.commit()
 
-    def remove_whale_token(self, chat_id, chain, token):
+    def remove_whale_token(self, chat_id, chain, token, all_chats=False):
+        """删除订阅代币；all_chats 时忽略 chat_id，供网页并集操作使用。"""
         with self._lock:
-            cur = self.conn.execute(
-                "DELETE FROM whale_tokens WHERE chat_id = ? AND chain = ? AND token = ?",
-                (str(chat_id), str(chain), str(token)),
-            )
+            if all_chats:
+                cur = self.conn.execute(
+                    "DELETE FROM whale_tokens WHERE chain = ? AND token = ?",
+                    (str(chain), str(token)),
+                )
+            else:
+                cur = self.conn.execute(
+                    "DELETE FROM whale_tokens WHERE chat_id = ? AND chain = ? AND token = ?",
+                    (str(chat_id), str(chain), str(token)),
+                )
             self.conn.commit()
         return cur.rowcount > 0
 

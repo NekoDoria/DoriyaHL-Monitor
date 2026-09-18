@@ -10,12 +10,13 @@ const state = {
   merge: Math.min(4, Math.max(0.25, parseFloat(localStorage.getItem("hl.merge")) || 1)),
   chartData: null,
   whaleChain: localStorage.getItem("hl.whaleChain") || "",
+  webChatId: "__web__",
   whaleData: null,
   whaleScan: null,
   settingsData: null,
   settingsInputs: null,
   theme: null,
-  overlays: { orders: true, fills: true, tpsl: true, volume: true, whale: false },
+  overlays: { orders: true, fills: true, tpsl: true, volume: true, whaleOrders: false, whaleFills: false },
   busy: false,
   chart: null,
   candleSeries: null,
@@ -30,6 +31,7 @@ const state = {
 const els = {
   sidebar: document.getElementById("sidebar"),
   sidebarToggle: document.getElementById("sidebar-toggle"),
+  sidebarBackdrop: document.getElementById("sidebar-backdrop"),
   refresh: document.getElementById("refresh-button"),
   accountForm: document.getElementById("account-form"),
   accountFormToggle: document.getElementById("toggle-account-form"),
@@ -57,6 +59,7 @@ const els = {
   chartRefresh: document.getElementById("chart-refresh"),
   chartFullscreen: document.getElementById("chart-fullscreen"),
   chartSideToggle: document.getElementById("chart-side-toggle"),
+  autohuntProcess: document.getElementById("autohunt-process"),
   chartFillWindow: document.getElementById("chart-fill-window"),
   fillWindowValue: document.getElementById("fill-window-value"),
   mergeSlider: document.getElementById("merge-slider"),
@@ -78,6 +81,10 @@ function chartPanel() {
   return panel("chart");
 }
 
+function setSidebarOpen(open) {
+  els.sidebar.classList.toggle("open", open);
+  els.sidebarBackdrop.hidden = !open;
+}
 function syncChartFullscreen(active) {
   const node = chartPanel();
   node.classList.toggle("fullscreen", active);
@@ -272,7 +279,7 @@ function renderAccounts() {
       state.chartCoin = "";
       renderAccounts();
       renderContext();
-      els.sidebar.classList.remove("open");
+      setSidebarOpen(false);
       loadView(true);
     };
     item.addEventListener("click", select);
@@ -634,6 +641,11 @@ const ZONE_DIR_MAP = {
 
 function zoneDirectionLabel(row) {
   if (row.kind === "whale") return row.side_raw === "B" ? "大户多" : "大户空";
+  if (row.kind === "whale_fill") {
+    const mapped = ZONE_DIR_MAP[String(row.dir || "")];
+    if (mapped) return `大户${mapped}`;
+    return row.side_raw === "B" ? "大户买入" : "大户卖出";
+  }
   if (row.kind === "fill") {
     const mapped = ZONE_DIR_MAP[String(row.dir || "")];
     if (mapped) return mapped;
@@ -644,7 +656,8 @@ function zoneDirectionLabel(row) {
 }
 
 function zoneKindLabel(row) {
-  if (row.kind === "whale") return "Autohunt 区间";
+  if (row.kind === "whale") return "Autohunt 挂单区间";
+  if (row.kind === "whale_fill") return "Autohunt 成交区间";
   if (row.kind === "fill") return "成交区间";
   if (row.kind === "tpsl") return row.label || "止盈止损";
   return "挂单区间";
@@ -968,14 +981,16 @@ function drawChartOverlays(data) {
   const visibleOrders = state.overlays.orders ? data.order_zones.slice(0, 12) : [];
   const visibleFills = state.overlays.fills ? data.fill_zones.slice(0, 12) : [];
   const visibleTpsl = state.overlays.tpsl ? data.tpsl_lines.slice(0, 12) : [];
-  const visibleWhale = state.overlays.whale ? (data.whale_zones || []).slice(0, 20) : [];
+  const visibleWhaleOrders = state.overlays.whaleOrders ? (data.whale_order_zones || data.whale_zones || []).slice(0, 20) : [];
+  const visibleWhaleFills = state.overlays.whaleFills ? (data.whale_fill_zones || []).slice(0, 30) : [];
   // 区间都是全宽横条，先挂大区间、后挂小区间，
   // 这样价格跨度小的叠在上层，鼠标才点得到。
   const zoneSpans = (row) => Math.abs(Number(row.max_px) - Number(row.min_px)) || 0;
   const zoneRows = [
     ...visibleOrders.map((row) => [row, "order"]),
     ...visibleFills.map((row) => [row, "fill"]),
-    ...visibleWhale.map((row) => [row, "whale"]),
+    ...visibleWhaleOrders.map((row) => [row, "whale"]),
+    ...visibleWhaleFills.map((row) => [row, "whalefill"]),
   ].sort((a, b) => zoneSpans(b[0]) - zoneSpans(a[0]));
   for (const [row, kind] of zoneRows) {
     const side = row.side_raw === "B" ? "long" : "short";
@@ -998,14 +1013,20 @@ function drawChartOverlays(data) {
   if (visibleFills.length) {
     els.chartLegend.append(legendChip("成交区间", `${visibleFills.length} 组`, "#7ee0c0"));
   }
-  if (visibleWhale.length) {
+  if (visibleWhaleOrders.length || visibleWhaleFills.length) {
     const label = data.whale_process ? `Autohunt(${data.whale_process})` : "Autohunt";
-    els.chartLegend.append(legendChip(label, `${visibleWhale.length} 组 · ${data.whale_account_count || 0} 账户`, "#6eaaff"));
+    const accounts = data.whale_account_count ? ` · ${data.whale_account_count}账户` : "";
+    if (visibleWhaleOrders.length) {
+      els.chartLegend.append(legendChip(`${label} 挂单`, `${visibleWhaleOrders.length} 组${accounts}`, "#6eaaff"));
+    }
+    if (visibleWhaleFills.length) {
+      els.chartLegend.append(legendChip(`${label} 成交`, `${visibleWhaleFills.length} 组${accounts}`, "#9d8cff"));
+    }
   }
   if (visibleTpsl.length) {
     els.chartLegend.append(legendChip("止盈止损", `${visibleTpsl.length} 条`, "#7c9cff"));
   }
-  if (!visibleOrders.length && !visibleFills.length && !visibleTpsl.length && !visibleWhale.length) {
+  if (!visibleOrders.length && !visibleFills.length && !visibleTpsl.length && !visibleWhaleOrders.length && !visibleWhaleFills.length) {
     els.chartLegend.append(make("div", "legend-empty", "当前无叠加区间"));
   }
 }
@@ -1017,6 +1038,7 @@ function renderChart(data) {
   state.candleSeries.setData(data.candles);
   state.volumeSeries.setData(data.volumes);
   els.chartSymbolLabel.textContent = `${data.coin} · ${data.interval}`;
+  els.autohuntProcess.textContent = data.whale_process ? `进程 ${data.whale_process}` : "未选择";
   drawChartOverlays(data);
   requestAnimationFrame(() => {
     updatePositionOverlay();
@@ -1531,6 +1553,35 @@ function whaleAddForm(info) {
   return wrap;
 }
 
+const CHAT_SOURCE_BADGES = {
+  web: { label: "Web", hint: () => "网页面板添加" },
+  telegram: {
+    label: "TG",
+    hint: (row) => `来自 Telegram（${(row.chat_ids || []).length} 个聊天），移除会同时取消那边的监控`,
+  },
+  both: {
+    label: "TG+Web",
+    hint: (row) => `网页和 Telegram 都有（${(row.chat_ids || []).length} 处），移除会一并取消`,
+  },
+};
+
+function whaleChatSource(row) {
+  const chats = row.chat_ids || [];
+  const hasWeb = chats.includes(state.webChatId || "__web__");
+  if (hasWeb && chats.length > 1) return "both";
+  if (hasWeb) return "web";
+  return "telegram";
+}
+
+function appendChatSourceBadge(node, row) {
+  const source = whaleChatSource(row);
+  const badge = CHAT_SOURCE_BADGES[source];
+  if (!badge) return;
+  const el = make("span", `account-source ${source}`, badge.label);
+  el.title = badge.hint(row);
+  node.append(el);
+}
+
 function whaleGroupKey(row) {
   const symbol = String(row.symbol || "").trim().toUpperCase();
   if (symbol) return symbol;
@@ -1573,6 +1624,7 @@ function whaleWatchRow(row) {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           action: "remove", chain: row.chain, token: row.token, address: row.address,
+          all_chats: true,
         }),
       });
       await refreshWhale();
@@ -1613,6 +1665,7 @@ function renderWhaleWatchGroups(info, body) {
     const head = make("div", "onchain-group-head");
     head.append(make("span", `onchain-caret${isCollapsed ? " collapsed" : ""}`, "▾"));
     head.append(make("span", "onchain-group-name", name));
+    appendChatSourceBadge(head, { chat_ids: [...new Set(rows.flatMap((row) => row.chat_ids || []))] });
     head.append(make("span", "onchain-group-meta", `${rows.length} 个地址 · ${chains.length} 条链`));
     if (failed) head.append(make("span", "onchain-group-failed", `${failed} 个失败`));
     head.append(make("span", "onchain-group-spacer"));
@@ -1721,6 +1774,8 @@ function renderWhaleTokens(info, body) {
   const rows = info.tokens.map((row) => {
     const action = make("td");
     const actions = make("div", "row-actions");
+    const nameCell = cell(row.symbol || row.token);
+    appendChatSourceBadge(nameCell, row);
     actions.append(rowActionButton("复扫", "", (event) => {
       event.stopPropagation();
       rescanWhaleToken(row.chain, row.token, event.currentTarget);
@@ -1732,7 +1787,9 @@ function renderWhaleTokens(info, body) {
         await request("/api/whale/token", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ action: "remove", chain: row.chain, token: row.token }),
+          body: JSON.stringify({
+            action: "remove", chain: row.chain, token: row.token, all_chats: true,
+          }),
         });
         await refreshWhale();
       } catch (error) {
@@ -1742,7 +1799,7 @@ function renderWhaleTokens(info, body) {
     }));
     action.append(actions);
     return [
-      cell(row.symbol || row.token),
+      nameCell,
       cell(row.chain),
       cell(row.top_pct === null || row.top_pct === undefined ? "—" : percentText(row.top_pct)),
       cell(row.score === null || row.score === undefined ? "—" : `${Math.round(Number(row.score))}/100`),
@@ -2102,7 +2159,8 @@ function endpoint(view) {
   if (view === "chart") {
     const coin = encodeURIComponent(state.chartCoin || "BTC");
     const fillWindow = Number(state.fillWindow) || 1440;
-    const whaleParam = state.overlays.whale ? "&whale=1" : "";
+    const wantsWhale = state.overlays.whaleOrders || state.overlays.whaleFills;
+    const whaleParam = wantsWhale ? "&whale=1" : "";
     const mergeParam = `&merge=${state.merge}`;
     return `/api/chart?address=${address}&coin=${coin}&interval=${state.chartInterval}&fill_window_min=${fillWindow}${whaleParam}${mergeParam}`;
   }
@@ -2224,7 +2282,7 @@ els.chartOverlays.addEventListener("click", (event) => {
   state.overlays[key] = !state.overlays[key];
   button.classList.toggle("active", state.overlays[key]);
   if (state.view !== "chart") return;
-  if (key === "whale") {
+  if (key === "whaleOrders" || key === "whaleFills") {
     loadView(true);
     return;
   }
@@ -2355,7 +2413,8 @@ els.whaleToken.addEventListener("keydown", (event) => {
   event.preventDefault();
   runWhaleScan();
 });
-els.sidebarToggle.addEventListener("click", () => els.sidebar.classList.toggle("open"));
+els.sidebarToggle.addEventListener("click", () => setSidebarOpen(!els.sidebar.classList.contains("open")));
+els.sidebarBackdrop.addEventListener("click", () => setSidebarOpen(false));
 
 els.accountFormToggle.addEventListener("click", () => {
   els.accountForm.hidden = !els.accountForm.hidden;
@@ -2393,3 +2452,6 @@ setView("overview");
 loadState()
   .then(() => loadView(true))
   .catch((error) => showState(state.view, "error", error.message));
+document.addEventListener("keydown", (event) => {
+  if (event.key === "Escape" && els.sidebar.classList.contains("open")) setSidebarOpen(false);
+});
