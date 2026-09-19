@@ -1,6 +1,6 @@
 const state = {
   accounts: [],
-  selected: localStorage.getItem("hl.selected") || "",
+  selectedAccounts: (() => { try { const value = JSON.parse(localStorage.getItem("hl.selectedAccounts") || "[]"); if (Array.isArray(value) && value.length) return value; const legacy = localStorage.getItem("hl.selected") || ""; return legacy ? [legacy] : []; } catch (_) { return []; } })(),
   view: "overview",
   fillsWindow: "1440",
   ordersLevel: "auto",
@@ -10,6 +10,8 @@ const state = {
   merge: Math.min(4, Math.max(0.25, parseFloat(localStorage.getItem("hl.merge")) || 1)),
   chartData: null,
   whaleChain: localStorage.getItem("hl.whaleChain") || "",
+  autohuntProc: localStorage.getItem("hl.autohuntProc") || "",
+  autohuntProcesses: [],
   webChatId: "__web__",
   whaleData: null,
   whaleScan: null,
@@ -18,7 +20,7 @@ const state = {
   wtaWindow: "30d",
   settingsInputs: null,
   theme: null,
-  overlays: { orders: true, fills: true, tpsl: true, volume: true, whaleOrders: false, whaleFills: false },
+  overlays: { orders: true, fills: true, tpsl: true, volume: true, whaleOrders: false, whaleFills: false, whalePositions: false },
   busy: false,
   chart: null,
   candleSeries: null,
@@ -184,7 +186,17 @@ function timeText(value, withDate = true) {
 }
 
 function sideText(row) {
-  if (row.dir) return row.dir;
+  const direction = String(row.dir || "").trim();
+  const directionMap = {
+    "Open Long": "开多",
+    "Close Long": "平多",
+    "Open Short": "开空",
+    "Close Short": "平空",
+    "Open": "开仓",
+    "Close": "平仓",
+  };
+  if (directionMap[direction]) return directionMap[direction];
+  if (direction) return direction;
   if (Number(row.szi) > 0) return "做多";
   if (Number(row.szi) < 0) return "做空";
   const side = String(row.side || "").toUpperCase();
@@ -209,8 +221,23 @@ function apiErrorText(error) {
   return /API not found/i.test(message) ? RESTART_HINT : message;
 }
 
+function selectedAccounts() {
+  return state.accounts.filter((account) => state.selectedAccounts.includes(account.address));
+}
+
+function selectedAddresses() {
+  return selectedAccounts().map((account) => account.address);
+}
+
+function persistSelectedAccounts() {
+  localStorage.setItem("hl.selectedAccounts", JSON.stringify(state.selectedAccounts));
+  const first = state.selectedAccounts[0] || "";
+  if (first) localStorage.setItem("hl.selected", first);
+  else localStorage.removeItem("hl.selected");
+}
+
 function selectedAccount() {
-  return state.accounts.find((account) => account.address === state.selected) || null;
+  return selectedAccounts()[0] || null;
 }
 
 function accountLabel(account) {
@@ -218,20 +245,28 @@ function accountLabel(account) {
 }
 
 function renderContext() {
-  const account = selectedAccount();
-  els.currentAccount.textContent = account ? accountLabel(account) : "选择账户";
-  els.currentAddress.textContent = account ? account.address : "—";
+  const accounts = selectedAccounts();
+  if (!accounts.length) {
+    els.currentAccount.textContent = "当前功能内选择账户";
+    els.currentAddress.textContent = "可选择多个账户叠加数据";
+    return;
+  }
+  els.currentAccount.textContent = accounts.length === 1
+    ? accountLabel(accounts[0])
+    : accounts.length + " 个账户叠加";
+  els.currentAddress.textContent = accounts.length === 1
+    ? accounts[0].address
+    : accounts.map(accountLabel).join("、");
 }
 
-// 仪表盘展示的是所有来源的账户并集，标出来源避免误会。
 const ACCOUNT_SOURCE_BADGES = {
   telegram: {
     label: "TG",
-    hint: (account) => `来自 Telegram（${account.chat_count || 1} 个聊天），移除会同时取消那边的订阅`,
+    hint: (account) => "来自 Telegram（" + (account.chat_count || 1) + " 个聊天），移除会同时取消那边的订阅",
   },
   both: {
     label: "TG+Web",
-    hint: (account) => `网页和 Telegram（${account.chat_count || 2} 个聊天）都订阅了，移除会一并取消`,
+    hint: (account) => "网页和 Telegram（" + (account.chat_count || 2) + " 个聊天）都订阅了，移除会一并取消",
   },
   web: {
     label: "Web",
@@ -239,67 +274,177 @@ const ACCOUNT_SOURCE_BADGES = {
   },
 };
 
-function renderAccounts() {
-  els.accountList.replaceChildren();
+function accountPickerButton(text, className = "") {
+  return make("button", ("account-picker-action " + className).trim(), text);
+}
+
+function renderAccountPicker(view) {
+  const slot = panel(view)?.querySelector(".panel-account-slot");
+  if (!slot) return;
+  slot.replaceChildren();
+
+  const picker = make("div", "account-picker");
+  const head = make("div", "account-picker-head");
+  const title = make("div", "account-picker-title");
+  const count = selectedAddresses().length;
+  title.append(
+    make("span", "", "数据账户"),
+    make("span", "account-picker-count", count ? " · 已选 " + count : " · 尚未选择"),
+  );
+  const actions = make("div", "account-picker-actions");
+  const all = accountPickerButton("全选");
+  const clear = accountPickerButton("清空");
+  const add = accountPickerButton("+ 添加账户", "primary");
+  all.addEventListener("click", () => {
+    state.selectedAccounts = state.accounts.map((account) => account.address);
+    persistSelectedAccounts();
+    renderAccountPicker(view);
+    renderContext();
+    loadView(true);
+  });
+  clear.addEventListener("click", () => {
+    state.selectedAccounts = [];
+    persistSelectedAccounts();
+    renderAccountPicker(view);
+    renderContext();
+    showState(view, "empty", "请选择一个或多个账户");
+    panel(view).querySelector(".panel-body").replaceChildren();
+  });
+  actions.append(all, clear, add);
+  head.append(title, actions);
+
+  const list = make("div", "account-picker-list");
   if (!state.accounts.length) {
-    els.accountList.append(make("div", "empty-note", "暂无账户"));
-    return;
+    list.append(make("div", "account-picker-empty", "暂无账户，请先添加一个地址"));
   }
   for (const account of state.accounts) {
-    const item = make("div", `account-item${account.address === state.selected ? " active" : ""}`);
-    item.setAttribute("role", "button");
-    item.setAttribute("tabindex", "0");
+    const active = state.selectedAccounts.includes(account.address);
+    const item = make("label", "account-picker-item" + (active ? " active" : ""));
+    const checkbox = make("input");
+    checkbox.type = "checkbox";
+    checkbox.checked = active;
+    checkbox.setAttribute("aria-label", "选择 " + accountLabel(account));
+    checkbox.addEventListener("change", () => {
+      if (checkbox.checked) {
+        if (!state.selectedAccounts.includes(account.address)) state.selectedAccounts.push(account.address);
+      } else {
+        state.selectedAccounts = state.selectedAccounts.filter((address) => address !== account.address);
+      }
+      persistSelectedAccounts();
+      renderAccountPicker(view);
+      renderContext();
+      loadView(true);
+    });
     const text = make("div", "account-text");
     const name = make("div", "account-name", accountLabel(account));
     const sourceBadge = ACCOUNT_SOURCE_BADGES[account.source];
     if (sourceBadge) {
-      const badge = make("span", `account-source ${account.source}`, sourceBadge.label);
+      const badge = make("span", "account-source " + account.source, sourceBadge.label);
       badge.title = sourceBadge.hint(account);
       name.append(badge);
     }
-    text.append(name);
-    text.append(make("div", "account-address", shortAddress(account.address)));
+    text.append(name, make("div", "account-address", shortAddress(account.address)));
     item.append(
+      checkbox,
       make("span", "account-avatar", (account.alias || account.address.slice(2, 4)).slice(0, 2).toUpperCase()),
       text,
     );
     if (account.source !== "config") {
-      const remove = make("button", "remove-account", "×");
-      remove.title = account.source === "web" ? "移除" : "移除（会同时取消 Telegram 那边的订阅）";
+      const remove = make("button", "account-picker-remove", "×");
+      remove.type = "button";
+      remove.title = "移除账户";
       remove.addEventListener("click", async (event) => {
+        event.preventDefault();
         event.stopPropagation();
         try {
-          await request(`/api/accounts/${account.address}`, { method: "DELETE" });
-          if (state.selected === account.address) state.selected = "";
+          await request("/api/accounts/" + account.address, { method: "DELETE" });
+          state.selectedAccounts = state.selectedAccounts.filter((address) => address !== account.address);
+          persistSelectedAccounts();
           await loadState();
           loadView(true);
         } catch (error) {
-          showState(state.view, "error", error.message);
+          showState(view, "error", apiErrorText(error));
         }
       });
       item.append(remove);
     }
-    const select = () => {
-      state.selected = account.address;
-      localStorage.setItem("hl.selected", state.selected);
-      state.chartCoin = "";
-      renderAccounts();
-      renderContext();
-      setSidebarOpen(false);
-      loadView(true);
-    };
-    item.addEventListener("click", select);
-    item.addEventListener("keydown", (event) => {
-      if (event.key === "Enter" || event.key === " ") {
-        event.preventDefault();
-        select();
-      }
-    });
-    els.accountList.append(item);
+    list.append(item);
   }
+
+  const form = make("form", "account-picker-form");
+  form.hidden = true;
+  const address = make("input");
+  address.placeholder = "0x...";
+  address.autocomplete = "off";
+  address.spellcheck = false;
+  address.required = true;
+  const alias = make("input");
+  alias.placeholder = "命名（可选）";
+  alias.autocomplete = "off";
+  const submit = make("button", "", "添加并选择");
+  submit.type = "submit";
+  form.append(address, alias, submit);
+  form.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    submit.disabled = true;
+    try {
+      const rawAddress = address.value.trim();
+      await request("/api/accounts", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ address: rawAddress, alias: alias.value.trim() }),
+      });
+      const normalized = rawAddress.toLowerCase();
+      if (!state.selectedAccounts.includes(normalized)) state.selectedAccounts.push(normalized);
+      persistSelectedAccounts();
+      await loadState();
+      renderAccountPicker(view);
+      loadView(true);
+    } catch (error) {
+      showState(view, "error", apiErrorText(error));
+    } finally {
+      submit.disabled = false;
+    }
+  });
+  add.addEventListener("click", () => {
+    form.hidden = !form.hidden;
+    if (!form.hidden) address.focus();
+  });
+  picker.append(head, list, form, make("div", "account-picker-note", "可同时勾选多个账户，页面会合并显示它们的数据"));
+  if (view === "chart") {
+    const procControl = make("div", "account-picker-autohunt");
+    const procHead = make("div", "account-picker-autohunt-head");
+    procHead.append(make("span", "account-picker-autohunt-title", "Autohunt 进程"));
+    procHead.append(make("span", "account-picker-autohunt-meta", state.autohuntProcesses.length ? `${state.autohuntProcesses.length} 个` : "未加载"));
+    const procSelect = make("select", "chart-select autohunt-process-select");
+    procSelect.setAttribute("aria-label", "选择 Autohunt 进程");
+    procSelect.append(new Option("默认进程", ""));
+    for (const process of state.autohuntProcesses) {
+      procSelect.append(new Option(`${process.name}${process.account_count ? ` · ${process.account_count}账户` : ""}`, process.name));
+    }
+    if (!state.autohuntProcesses.some((process) => process.name === state.autohuntProc)) state.autohuntProc = "";
+    procSelect.value = state.autohuntProc;
+    procSelect.addEventListener("change", () => {
+      state.autohuntProc = procSelect.value;
+      localStorage.setItem("hl.autohuntProc", state.autohuntProc);
+      loadView(true);
+    });
+    procControl.append(procHead, procSelect);
+    list.before(procControl);
+  }
+  slot.append(picker);
+}
+
+function renderAccountPickers() {
+  document.querySelectorAll(".panel-account-slot").forEach((slot) => {
+    const parent = slot.closest(".panel");
+    if (parent?.dataset.panel === state.view) renderAccountPicker(state.view);
+    else slot.replaceChildren();
+  });
 }
 
 function panel(view) {
+
   return document.querySelector(`.panel[data-panel="${view}"]`);
 }
 
@@ -378,15 +523,16 @@ function renderOverview(data, body) {
   );
   body.append(metrics, sectionTitle("合约持仓"));
   const rows = data.positions.map((row) => [
+    ...(data.multi ? [cell(row.account || "合计")] : []),
     cell(row.coin),
     cell(sideText(row)),
     cell(qty.format(Math.abs(row.szi))),
     cell(formatAmount(row.notional)),
     cell(row.entry || "-"),
-    cell(row.leverage ? `${row.leverage}x` : "-"),
+    cell(row.leverage ? row.leverage + "x" : "-"),
     cell(signed(row.pnl), pnlClass(row.pnl)),
   ]);
-  body.append(table(["币种", "方向", "数量", "价值", "开仓均价", "杠杆", "浮动盈亏"], rows));
+  body.append(table((data.multi ? ["账户"] : []).concat(["币种", "方向", "数量", "价值", "开仓均价", "杠杆", "浮动盈亏"]), rows));
   if (data.spot.length) {
     body.append(sectionTitle("现货余额"));
     body.append(table(["币种", "余额", "冻结"], data.spot.slice(0, 30).map((row) => [
@@ -409,7 +555,8 @@ function renderFills(data, body) {
     cell(formatAmount(row.buy)), cell(formatAmount(row.sell)), cell(signed(row.pnl), pnlClass(row.pnl)),
   ])));
   body.append(sectionTitle("最近成交"));
-  body.append(table(["时间", "币种", "方向", "数量", "价格", "金额", "盈亏"], data.recent.slice(0, 30).map((row) => [
+  body.append(table((data.multi ? ["账户"] : []).concat(["时间", "币种", "方向", "数量", "价格", "金额", "盈亏"]), data.recent.slice(0, 30).map((row) => [
+    ...(data.multi ? [cell(row.account || "—")] : []),
     cell(timeText(row.time)), cell(row.coin), cell(sideText(row)), cell(qty.format(row.size)),
     cell(qty.format(row.price)), cell(formatAmount(row.notional)), cell(signed(row.closed_pnl), pnlClass(row.closed_pnl)),
   ])));
@@ -421,6 +568,7 @@ function renderEvents(data, body) {
   for (const event of data.events) {
     const item = make("div", "event-item");
     const meta = make("div", "event-meta");
+    if (data.multi) meta.append(make("span", "", event.account || "账户"));
     meta.append(make("span", "", event.kind || "event"), make("span", "", timeText(event.time)));
     item.append(meta, make("div", "", event.text || ""));
     list.append(item);
@@ -670,7 +818,8 @@ function zoneKindLabel(row) {
 }
 function zoneTooltipText(row) {
   const accounts = row.accounts ? ` · ${row.accounts}账户` : "";
-  return `${zoneKindLabel(row)} · ${zoneDirectionLabel(row)} · ${row.count}笔${accounts} · ${formatAmount(row.total_value)}`;
+  const owner = row.account ? ` · ${row.account}` : "";
+  return `${zoneKindLabel(row)} · ${zoneDirectionLabel(row)} · ${row.count}笔${accounts}${owner} · ${formatAmount(row.total_value)}`;
 }
 
 function showZoneTooltip(event, row) {
@@ -867,16 +1016,26 @@ function positionDetailRow(label, value, className = "") {
 }
 
 function renderPositionPopup(data, position, event) {
+  const coin = position.coin || state.chartData.coin;
+  const isAutohunt = Boolean(position.account_count);
   const leverage = Number(position.leverage) || 0;
-  const entryValue = Number(position.entry) * Number(position.size);
-  const margin = leverage > 0 ? Number(position.notional) / leverage : entryValue;
+  const size = Number(position.size || Math.abs(position.szi || 0));
+  const entryValue = Number(position.entry) * size;
+  const margin = Number(position.margin) > 0
+    ? Number(position.margin)
+    : leverage > 0
+      ? Number(position.notional) / leverage
+      : entryValue;
   const roi = margin > 0 ? Number(position.pnl) / margin * 100 : 0;
+  const leverageText = leverage > 0
+    ? `${leverage % 1 === 0 ? leverage.toFixed(0) : leverage.toFixed(2)}x`
+    : "-";
   const popup = els.positionPopup;
   const title = make("div", "position-popup-head");
   const titleText = make("div", "position-popup-title");
   titleText.append(
     make("span", `position-side ${position.side === "做多" ? "long" : "short"}`, position.side),
-    make("span", "", `${state.chartData.coin} 仓位`),
+    make("span", "", `${coin}${isAutohunt ? " Autohunt 聚合仓位" : " 仓位"}`),
   );
   const close = make("button", "position-close", "×");
   close.type = "button";
@@ -886,11 +1045,17 @@ function renderPositionPopup(data, position, event) {
 
   const details = make("div", "position-detail");
   details.append(
+    positionDetailRow("加权均价", priceText(position.entry)),
+    positionDetailRow("持仓数量", qty.format(size)),
     positionDetailRow("名义价值", formatAmount(position.notional)),
-    positionDetailRow("杠杆", leverage > 0 ? `${leverage}x` : "-"),
+    positionDetailRow("杠杆", leverageText),
+    positionDetailRow("浮动盈亏", pnlLabel(position.pnl), pnlClass(position.pnl)),
     positionDetailRow("收益率", `${roi >= 0 ? "+" : "-"}${Math.abs(roi).toFixed(2)}%`, pnlClass(roi)),
-    positionDetailRow("更新时间", timeText(data.generated_at)),
   );
+  if (isAutohunt) {
+    details.append(positionDetailRow("账户数", `${position.account_count} 个`));
+  }
+  details.append(positionDetailRow("更新时间", timeText(data.generated_at)));
 
   popup.replaceChildren(title, details);
   popup.hidden = false;
@@ -943,10 +1108,50 @@ function renderPositionPopup(data, position, event) {
   });
 }
 
+function chartPositions(data) {
+  if (Array.isArray(data?.positions)) return data.positions;
+  return data?.position ? [data.position] : [];
+}
+function positionAtChartEvent(event) {
+  const data = state.chartData;
+  if (!data || !state.candleSeries) return null;
+  const rows = [
+    ...chartPositions(data),
+    ...(state.overlays.whalePositions ? (data.whale_positions || []) : []),
+  ];
+  if (!rows.length) return null;
+  const chartRect = els.priceChart.getBoundingClientRect();
+  const pointerY = event.clientY - chartRect.top;
+  let best = null;
+  for (const position of rows) {
+    if (!(Number(position.entry) > 0)) continue;
+    let coordinate;
+    try {
+      coordinate = state.candleSeries.priceToCoordinate(Number(position.entry));
+    } catch (_) {
+      coordinate = NaN;
+    }
+    if (!Number.isFinite(coordinate)) continue;
+    const distance = Math.abs(pointerY - coordinate);
+    if (distance <= 16 && (!best || distance < best.distance)) {
+      best = { position, distance };
+    }
+  }
+  return best?.position || null;
+}
+
+function handlePositionClick(event) {
+  const position = positionAtChartEvent(event);
+  if (!position) return;
+  event.stopPropagation();
+  hidePositionPopup();
+  renderPositionPopup(state.chartData, position, event);
+}
+
 function updatePositionOverlay() {
   const data = state.chartData;
-  const position = data?.position;
-  if (!position || !(Number(position.entry) > 0) || !state.candleSeries) {
+  const position = chartPositions(data).find((row) => Number(row.entry) > 0);
+  if (!position || !state.candleSeries) {
     els.positionHitbox.hidden = true;
     hidePositionTooltip();
     return;
@@ -989,6 +1194,7 @@ function drawChartOverlays(data) {
   const visibleTpsl = state.overlays.tpsl ? data.tpsl_lines.slice(0, 12) : [];
   const visibleWhaleOrders = state.overlays.whaleOrders ? (data.whale_order_zones || data.whale_zones || []).slice(0, 20) : [];
   const visibleWhaleFills = state.overlays.whaleFills ? (data.whale_fill_zones || []).slice(0, 30) : [];
+  const visibleWhalePositions = state.overlays.whalePositions ? (data.whale_positions || []).slice(0, 30) : [];
   // 区间都是全宽横条，先挂大区间、后挂小区间，
   // 这样价格跨度小的叠在上层，鼠标才点得到。
   const zoneSpans = (row) => Math.abs(Number(row.max_px) - Number(row.min_px)) || 0;
@@ -1008,8 +1214,30 @@ function drawChartOverlays(data) {
     const size = row.size ? ` ${qty.format(row.size)}` : "";
     addPriceLine(row.price, color, `${row.label} ${row.side}${size}`, 2);
   }
-  if (data.position && Number(data.position.entry) > 0) {
-    addPriceLine(data.position.entry, "#c8b0ff", data.position.side, 2);
+  const positions = chartPositions(data);
+  for (const position of positions) {
+    const account = position.account ? ` · ${position.account}` : "";
+    const color = position.side === "做空" ? "#ff9db7" : "#c8b0ff";
+    addPriceLine(position.entry, color, `${position.side}${account}`, 2);
+  }
+  if (positions.length) {
+    for (const position of positions) {
+      const account = position.account ? ` · ${position.account}` : "";
+      const color = position.side === "做空" ? "#ff9db7" : "#c8b0ff";
+      els.chartLegend.append(legendChip(`持仓${account}`, priceText(position.entry), color));
+    }
+  }
+  for (const position of visibleWhalePositions) {
+    const color = position.side === "做空" ? "#ff5c7a" : "#00e0a8";
+    const accounts = position.account_count ? ` · ${position.account_count}账户` : "";
+    addPriceLine(position.entry, color, `${position.side}${accounts}`, 2);
+  }
+  if (visibleWhalePositions.length) {
+    const label = data.whale_process ? `Autohunt(${data.whale_process}) 持仓` : "Autohunt 持仓";
+    for (const position of visibleWhalePositions) {
+      const color = position.side === "做空" ? "#ff5c7a" : "#00e0a8";
+      els.chartLegend.append(legendChip(label, `${position.side} ${priceText(position.entry)}`, color));
+    }
   }
   state.volumeSeries.applyOptions({ visible: state.overlays.volume });
 
@@ -1032,7 +1260,7 @@ function drawChartOverlays(data) {
   if (visibleTpsl.length) {
     els.chartLegend.append(legendChip("止盈止损", `${visibleTpsl.length} 条`, "#7c9cff"));
   }
-  if (!visibleOrders.length && !visibleFills.length && !visibleTpsl.length && !visibleWhaleOrders.length && !visibleWhaleFills.length) {
+  if (!positions.length && !visibleOrders.length && !visibleFills.length && !visibleTpsl.length && !visibleWhaleOrders.length && !visibleWhaleFills.length && !visibleWhalePositions.length) {
     els.chartLegend.append(make("div", "legend-empty", "当前无叠加区间"));
   }
 }
@@ -1119,6 +1347,7 @@ function renderAutohunt(data, body) {
       make("span", "", `每轮 ${row.limit}`),
       make("span", "", `间隔 ${Number(row.interval_h).toFixed(1).replace(/\.0$/, "")}h`),
       make("span", "", `已收集 ${row.account_count}`),
+      make("span", "", `持仓 ${row.position_count || 0}`),
       make("span", "", `上次 ${relativeTime(row.last_run)}`),
     );
     if (row.enabled && !row.running && row.next_run) {
@@ -1137,6 +1366,22 @@ function renderAutohunt(data, body) {
       card.append(bar, make("div", "progress-text", `已精算 ${done}/${total}（${pct}%）`));
     }
 
+    const positions = row.positions || [];
+    card.append(make("div", "process-section-title", positions.length ? "聚合持仓（同方向、均价相近）" : "聚合持仓（当前无持仓）"));
+    if (positions.length) {
+      const positionRows = positions.map((position) => [
+        cell(position.coin),
+        cell(position.side || "—"),
+        cell(qty.format(Math.abs(Number(position.szi) || 0))),
+        cell(priceText(position.entry)),
+        cell(formatAmount(position.notional)),
+        cell(signed(position.pnl), pnlClass(position.pnl)),
+        cell(position.account_count ? String(position.account_count) : "—"),
+      ]);
+      card.append(table(["币种", "方向", "数量", "加权均价", "持仓价值", "浮动盈亏", "账户数"], positionRows));
+    } else {
+      card.append(make("div", "process-empty", "本轮收录账户暂无未平仓头寸"));
+    }
     if (row.accounts.length) {
       const rows = row.accounts.map((acc) => [
         cell(acc.alias || "—"),
@@ -2337,6 +2582,13 @@ function renderReport(data, body) {
   body.append(report);
 }
 
+function renderReportSet(data, body) {
+  for (const report of data.reports || []) {
+    body.append(sectionTitle(report.account || "账户"));
+    renderReport(report, body);
+  }
+}
+
 function renderView(view, data) {
   if (view === "chart") {
     renderChart(data);
@@ -2361,21 +2613,28 @@ function renderView(view, data) {
   else if (view === "events") renderEvents(data, body);
   else if (view === "autohunt") renderAutohunt(data, body);
   else if (view === "chart") renderChart(data);
+  else if (data.multi) renderReportSet(data, body);
   else renderReport(data, body);
 }
 
-function endpoint(view) {
-  const address = encodeURIComponent(state.selected);
+function endpoint(view, rawAddress = "") {
+  const address = encodeURIComponent(rawAddress);
   if (view === "overview") return `/api/overview?address=${address}`;
   if (view === "fills") return `/api/fills?address=${address}&window_min=${state.fillsWindow}`;
   if (view === "orders") return `/api/orders?address=${address}&level=${state.ordersLevel}`;
   if (view === "chart") {
     const coin = encodeURIComponent(state.chartCoin || "BTC");
     const fillWindow = Number(state.fillWindow) || 1440;
-    const wantsWhale = state.overlays.whaleOrders || state.overlays.whaleFills;
-    const whaleParam = wantsWhale ? "&whale=1" : "";
+    const wantsWhale = state.overlays.whaleOrders || state.overlays.whaleFills || state.overlays.whalePositions;
     const mergeParam = `&merge=${state.merge}`;
-    return `/api/chart?address=${address}&coin=${coin}&interval=${state.chartInterval}&fill_window_min=${fillWindow}${whaleParam}${mergeParam}`;
+    if (!wantsWhale) {
+      return `/api/chart?address=${address}&coin=${coin}&interval=${state.chartInterval}&fill_window_min=${fillWindow}${mergeParam}`;
+    }
+    const proc = encodeURIComponent(state.autohuntProc || "");
+    const whaleOrders = state.overlays.whaleOrders ? 1 : 0;
+    const whaleFills = state.overlays.whaleFills ? 1 : 0;
+    const whalePositions = state.overlays.whalePositions ? 1 : 0;
+    return `/api/chart?address=${address}&coin=${coin}&interval=${state.chartInterval}&fill_window_min=${fillWindow}&whale=1&proc=${proc}&whale_orders=${whaleOrders}&whale_fills=${whaleFills}&whale_positions=${whalePositions}${mergeParam}`;
   }
   if (view === "tpsl") return `/api/tpsl?address=${address}`;
   if (view === "history") return `/api/history?address=${address}`;
@@ -2394,6 +2653,7 @@ function setView(view) {
   for (const node of document.querySelectorAll(".panel")) {
     node.classList.toggle("active", node.dataset.panel === view);
   }
+  renderAccountPickers();
   if (view === "chart" && state.chart) {
     setTimeout(() => state.chart.applyOptions({
       width: els.priceChart.clientWidth,
@@ -2402,22 +2662,144 @@ function setView(view) {
   }
 }
 
+const ACCOUNT_VIEWS = new Set(["overview", "fills", "orders", "tpsl", "history", "chart", "events"]);
+
+function accountNameFor(address) {
+  const account = state.accounts.find((item) => item.address === address);
+  return account ? accountLabel(account) : shortAddress(address);
+}
+
+function aggregateOverview(items, addresses) {
+  const summaryKeys = ["account_value", "withdrawable", "unrealized_pnl", "total_ntl_pos"];
+  const summary = {};
+  for (const key of summaryKeys) summary[key] = items.reduce((total, item) => total + (Number(item.summary?.[key]) || 0), 0);
+  const positionMap = new Map();
+  for (const [index, item] of items.entries()) {
+    for (const row of item.positions || []) {
+      const key = row.coin;
+      const current = positionMap.get(key) || {
+        coin: row.coin, szi: 0, notional: 0, pnl: 0, entries: new Set(), leverages: new Set(), accounts: new Set(),
+      };
+      current.szi += Number(row.szi) || 0;
+      current.notional += Number(row.notional) || 0;
+      current.pnl += Number(row.pnl) || 0;
+      if (row.entry) current.entries.add(String(row.entry));
+      if (row.leverage) current.leverages.add(String(row.leverage));
+      current.accounts.add(accountNameFor(addresses[index]));
+      positionMap.set(key, current);
+    }
+  }
+  const positions = [...positionMap.values()]
+    .map((row) => ({
+      ...row,
+      entry: row.entries.size === 1 ? [...row.entries][0] : "",
+      leverage: row.leverages.size === 1 ? [...row.leverages][0] : "",
+      account: [...row.accounts].join("、"),
+    }))
+    .sort((a, b) => b.notional - a.notional);
+  const spotMap = new Map();
+  for (const item of items) {
+    for (const row of item.spot || []) {
+      const current = spotMap.get(row.coin) || { coin: row.coin, total: 0, hold: 0 };
+      current.total += Number(row.total) || 0;
+      current.hold += Number(row.hold) || 0;
+      spotMap.set(row.coin, current);
+    }
+  }
+  return { type: "overview", summary, positions, spot: [...spotMap.values()].sort((a, b) => b.total - a.total), generated_at: Date.now(), multi: true, addresses };
+}
+
+function aggregateFills(items, addresses) {
+  const coins = new Map();
+  let recent = [];
+  const result = { type: "fills", window_min: items[0]?.window_min, window_label: items[0]?.window_label, count: 0, notional: 0, buy: 0, sell: 0, realized_pnl: 0 };
+  for (const [index, item] of items.entries()) {
+    result.count += Number(item.count) || 0;
+    result.notional += Number(item.notional) || 0;
+    result.buy += Number(item.buy) || 0;
+    result.sell += Number(item.sell) || 0;
+    result.realized_pnl += Number(item.realized_pnl) || 0;
+    for (const row of item.coins || []) {
+      const current = coins.get(row.coin) || { coin: row.coin, count: 0, notional: 0, buy: 0, sell: 0, pnl: 0 };
+      current.count += Number(row.count) || 0;
+      current.notional += Number(row.notional) || 0;
+      current.buy += Number(row.buy) || 0;
+      current.sell += Number(row.sell) || 0;
+      current.pnl += Number(row.pnl) || 0;
+      coins.set(row.coin, current);
+    }
+    recent = recent.concat((item.recent || []).map((row) => ({ ...row, account: accountNameFor(addresses[index]) })));
+  }
+  result.coins = [...coins.values()].sort((a, b) => b.notional - a.notional);
+  result.recent = recent.sort((a, b) => Number(b.time) - Number(a.time)).slice(0, 100);
+  result.generated_at = Date.now();
+  result.multi = true;
+  result.addresses = addresses;
+  return result;
+}
+
+function aggregateEvents(items, addresses) {
+  const events = [];
+  for (const [index, item] of items.entries()) {
+    events.push(...(item.events || []).map((event) => ({ ...event, account: accountNameFor(addresses[index]) })));
+  }
+  return { type: "events", events: events.sort((a, b) => Number(b.time) - Number(a.time)).slice(0, 100), generated_at: Date.now(), multi: true, addresses };
+}
+
+function aggregateChart(items, addresses) {
+  const first = items[0] || {};
+  const addAccount = (rows, index) => (rows || []).map((row) => ({ ...row, account: accountNameFor(addresses[index]) }));
+  const positions = items.flatMap((item, index) => {
+    const position = item.position;
+    if (!position || !(Number(position.entry) > 0)) return [];
+    return [{ ...position, account: accountNameFor(addresses[index]) }];
+  });
+  return {
+    ...first,
+    order_zones: items.flatMap((item, index) => addAccount(item.order_zones, index)),
+    fill_zones: items.flatMap((item, index) => addAccount(item.fill_zones, index)),
+    tpsl_lines: items.flatMap((item, index) => addAccount(item.tpsl_lines, index)),
+    whale_process: first.whale_process || "",
+    whale_account_count: first.whale_account_count || 0,
+    whale_order_zones: first.whale_order_zones || first.whale_zones || [],
+    whale_fill_zones: first.whale_fill_zones || [],
+    whale_positions: first.whale_positions || [],
+    position: null,
+    positions,
+    generated_at: Date.now(),
+    multi: true,
+    addresses,
+  };
+}
+
+function aggregateViewData(view, items, addresses) {
+  if (items.length === 1) return items[0];
+  if (view === "overview") return aggregateOverview(items, addresses);
+  if (view === "fills") return aggregateFills(items, addresses);
+  if (view === "events") return aggregateEvents(items, addresses);
+  if (view === "chart") return aggregateChart(items, addresses);
+  return { type: "report", multi: true, reports: items.map((item, index) => ({ ...item, account: accountNameFor(addresses[index]) })), generated_at: Date.now(), addresses };
+}
+
 async function loadView(force = false) {
   if (state.busy) return;
   const view = state.view;
+  const addresses = selectedAddresses();
   if (["whale", "whale-tx", "settings"].includes(view)) {
-    if (view === "whale-tx" && !els.wtaAsset.children.length) {
-      await loadWtaAssets();
-    }
-  } else if (!state.selected) {
-    showState(view, "empty", "暂无账户");
+    if (view === "whale-tx" && !els.wtaAsset.children.length) await loadWtaAssets();
+  } else if (ACCOUNT_VIEWS.has(view) && !addresses.length) {
+    clearState(view);
+    panel(view).querySelector(".panel-body").replaceChildren();
+    showState(view, "empty", "请选择一个或多个账户");
     return;
   }
   state.busy = true;
   els.refresh.disabled = true;
   setStateLoading(view);
   try {
-    const data = await request(endpoint(view));
+    const data = ACCOUNT_VIEWS.has(view)
+      ? aggregateViewData(view, await Promise.all(addresses.map((address) => request(endpoint(view, address)))), addresses)
+      : await request(endpoint(view));
     if (state.view === view) {
       clearState(view);
       if (view === "chart") renderChartSymbols(data);
@@ -2435,16 +2817,14 @@ async function loadView(force = false) {
 async function loadState() {
   const payload = await request("/api/state");
   state.accounts = payload.accounts || [];
-  if (state.selected && !state.accounts.some((account) => account.address === state.selected)) {
-    state.selected = state.accounts[0]?.address || "";
-  } else if (!state.selected && state.accounts[0]) {
-    state.selected = state.accounts[0].address;
-  }
-  if (state.selected) localStorage.setItem("hl.selected", state.selected);
+  const valid = new Set(state.accounts.map((account) => account.address));
+  state.selectedAccounts = state.selectedAccounts.filter((address) => valid.has(address));
+  persistSelectedAccounts();
+  state.autohuntProcesses = payload.autohunt_processes || [];
   if (payload.settings) applyTheme(payload.settings);
   els.network.textContent = payload.network || "";
-  els.version.textContent = payload.version ? `v${payload.version}` : "";
-  renderAccounts();
+  els.version.textContent = payload.version ? "v" + payload.version : "";
+  renderAccountPickers();
   renderContext();
 }
 
@@ -2500,7 +2880,7 @@ els.chartOverlays.addEventListener("click", (event) => {
   state.overlays[key] = !state.overlays[key];
   button.classList.toggle("active", state.overlays[key]);
   if (state.view !== "chart") return;
-  if (key === "whaleOrders" || key === "whaleFills") {
+  if (key === "whaleOrders" || key === "whaleFills" || key === "whalePositions") {
     loadView(true);
     return;
   }
@@ -2512,18 +2892,19 @@ els.chartOverlays.addEventListener("click", (event) => {
 });
 
 function showPositionTooltip(event) {
-  const position = state.chartData?.position;
+  const position = chartPositions(state.chartData).find((row) => Number(row.entry) > 0);
   if (!position) return;
   const containerRect = els.chartContainer.getBoundingClientRect();
   const tooltip = els.positionTooltip;
-  tooltip.textContent = `${position.side} · ${pnlLabel(position.pnl)}`;
+  const account = position.account ? ` · ${position.account}` : "";
+  tooltip.textContent = `${position.side}${account} · ${pnlLabel(position.pnl)}`;
   tooltip.hidden = false;
   const left = Math.min(
     Math.max(8, event.clientX - containerRect.left - tooltip.offsetWidth / 2),
     Math.max(8, els.chartContainer.clientWidth - tooltip.offsetWidth - 8),
   );
   const top = Math.min(
-    Math.max(8, Number(els.positionHitbox.style.top || 0) + 24),
+    Math.max(8, (parseFloat(els.positionHitbox.style.top) || 0) + 24),
     Math.max(8, els.chartContainer.clientHeight - tooltip.offsetHeight - 8),
   );
   tooltip.style.left = `${left}px`;
@@ -2536,6 +2917,7 @@ els.priceChart.addEventListener("mouseleave", () => {
   setActiveZone(null);
   hideZoneTooltip();
 });
+els.chartContainer.addEventListener("click", handlePositionClick, true);
 els.priceChart.addEventListener("click", handleZoneClick);
 
 els.positionHitbox.addEventListener("mouseenter", showPositionTooltip);
@@ -2544,10 +2926,13 @@ els.positionHitbox.addEventListener("mouseleave", hidePositionTooltip);
 
 els.positionHitbox.addEventListener("click", (event) => {
   event.stopPropagation();
-  if (!state.chartData?.position) return;
-  if (els.positionPopup.hidden) renderPositionPopup(state.chartData, state.chartData.position, event);
+  const position = chartPositions(state.chartData).find((row) => Number(row.entry) > 0);
+  if (!position) return;
+  if (els.positionPopup.hidden) renderPositionPopup(state.chartData, position, event);
   else hidePositionPopup();
 });
+
+
 
 els.positionPopup.addEventListener("click", (event) => event.stopPropagation());
 els.zonePopup.addEventListener("click", (event) => event.stopPropagation());
@@ -2649,37 +3034,6 @@ els.whaleToken.addEventListener("keydown", (event) => {
 els.sidebarToggle.addEventListener("click", () => setSidebarOpen(!els.sidebar.classList.contains("open")));
 els.sidebarClose.addEventListener("click", () => setSidebarOpen(false));
 els.sidebarBackdrop.addEventListener("click", () => setSidebarOpen(false));
-
-els.accountFormToggle.addEventListener("click", () => {
-  els.accountForm.hidden = !els.accountForm.hidden;
-  if (!els.accountForm.hidden) els.accountAddress.focus();
-});
-
-els.accountForm.addEventListener("submit", async (event) => {
-  event.preventDefault();
-  const address = els.accountAddress.value.trim();
-  const alias = els.accountAlias.value.trim();
-  if (!address) return;
-  els.accountForm.disabled = true;
-  try {
-    await request("/api/accounts", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ address, alias }),
-    });
-    state.selected = address.toLowerCase();
-    localStorage.setItem("hl.selected", state.selected);
-    state.chartCoin = "";
-    els.accountForm.reset();
-    els.accountForm.hidden = true;
-    await loadState();
-    loadView(true);
-  } catch (error) {
-    showState(state.view, "error", error.message);
-  } finally {
-    els.accountForm.disabled = false;
-  }
-});
 
 initFillWindowSelect();
 setView("overview");

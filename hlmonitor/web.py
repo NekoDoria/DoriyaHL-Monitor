@@ -54,6 +54,7 @@ FILL_WINDOWS = {
     4320: "3天",
     10080: "1周",
 }
+AUTOHUNT_POSITION_CLUSTER_PCT = 0.01
 
 
 def _json_safe(value):
@@ -165,6 +166,24 @@ class WebApp:
         removed = self.store.delete_subscriptions_by_address(address)
         item["removed_chats"] = removed
         return item
+
+    def autohunt_processes(self):
+        """Return lightweight Autohunt process metadata for selectors."""
+        rows = []
+        for entry in self.store.all_autohunt_configs():
+            settings = entry.get("settings") or {}
+            chat_id = entry["chat_id"]
+            name = entry["name"]
+            rows.append(
+                {
+                    "name": name,
+                    "account_count": len(self.store.get_auto_accounts(chat_id, name)),
+                    "enabled": str(settings.get("enabled")) == "1",
+                    "running": str(settings.get("progress_running")) == "1",
+                }
+            )
+        rows.sort(key=lambda row: (not row["enabled"], row["name"].lower()))
+        return rows
 
     def overview_data(self, raw_address):
         address = normalize_address(raw_address)
@@ -301,7 +320,7 @@ class WebApp:
         }
 
 
-    def chart_data(self, raw_address, raw_coin, raw_interval="15m", fill_window_min=1440, whale=False, proc="", merge=1.0):
+    def chart_data(self, raw_address, raw_coin, raw_interval="15m", fill_window_min=1440, whale=False, proc="", merge=1.0, whale_orders=True, whale_fills=True, whale_positions=False):
         address = normalize_address(raw_address)
         coin = str(raw_coin or "BTC").strip()
         interval = str(raw_interval or "15m").strip()
@@ -317,7 +336,10 @@ class WebApp:
         except (TypeError, ValueError):
             merge = 1.0
         merge = min(max(merge, 0.25), 4.0)
-        cache_key = (address, coin, interval, fill_window_min, bool(whale), str(proc or ""), round(merge, 3))
+        cache_key = (
+            address, coin, interval, fill_window_min, bool(whale), str(proc or ""),
+            round(merge, 3), bool(whale_orders), bool(whale_fills), bool(whale_positions),
+        )
         cached = self.chart_cache.get(cache_key)
         if cached and time.monotonic() - cached[0] < self.chart_cache_ttl:
             return cached[1]
@@ -533,10 +555,16 @@ class WebApp:
             "whale_zones": [],
             "whale_order_zones": [],
             "whale_fill_zones": [],
+            "whale_positions": [],
         }
         if whale:
             try:
-                whale_data = self.whale_zones(proc, coin, merge, fill_window_min)
+                whale_data = self.whale_zones(
+                    proc, coin, merge, fill_window_min,
+                    include_orders=bool(whale_orders),
+                    include_fills=bool(whale_fills),
+                    include_positions=bool(whale_positions),
+                )
             except Exception as exc:
                 print(f"[web] whale zones failed: {exc}")
                 whale_data = None
@@ -546,10 +574,116 @@ class WebApp:
                 result["whale_zones"] = whale_data["order_zones"]
                 result["whale_order_zones"] = whale_data["order_zones"]
                 result["whale_fill_zones"] = whale_data["fill_zones"]
+                result["whale_positions"] = whale_data["positions"]
         if fills_ok:
             self.chart_cache[cache_key] = (time.monotonic(), result)
         return result
 
+    def _autohunt_account_positions(self, address):
+        state = self.monitor.api.clearinghouse_state(address) or {}
+        rows = []
+        for item in state.get("assetPositions") or []:
+            if not isinstance(item, dict):
+                continue
+            position = item.get("position") or item
+            coin = str(position.get("coin") or "").strip()
+            szi = _num(position.get("szi"))
+            if not coin or abs(szi) <= 0:
+                continue
+            leverage = position.get("leverage") or {}
+            if isinstance(leverage, dict):
+                leverage = leverage.get("value")
+            rows.append(
+                {
+                    "coin": coin,
+                    "side": "做多" if szi > 0 else "做空",
+                    "szi": szi,
+                    "size": abs(szi),
+                    "entry": _num(position.get("entryPx")),
+                    "notional": abs(_num(position.get("positionValue", position.get("notional")))),
+                    "pnl": _num(position.get("unrealizedPnl")),
+                    "leverage": _num(leverage),
+                    "margin": _num(position.get("marginUsed")),
+                }
+            )
+        return rows
+
+    @staticmethod
+    def _cluster_autohunt_positions(rows):
+        groups = []
+        ordered = sorted(
+            rows,
+            key=lambda row: (
+                str(row.get("coin") or ""),
+                str(row.get("side") or ""),
+                _num(row.get("entry")),
+            ),
+        )
+        for row in ordered:
+            coin = str(row.get("coin") or "")
+            side = str(row.get("side") or "")
+            entry = _num(row.get("entry"))
+            weight = abs(_num(row.get("szi"))) or 1.0
+            match = None
+            for group in reversed(groups):
+                if group["coin"] != coin or group["side"] != side:
+                    continue
+                anchor = group["entry_total"] / group["weight"] if group["weight"] else 0.0
+                if not anchor or abs(entry - anchor) / abs(anchor) <= AUTOHUNT_POSITION_CLUSTER_PCT:
+                    match = group
+                    break
+                if group["entry"] < entry:
+                    break
+            if match is None:
+                match = {
+                    "coin": coin,
+                    "side": side,
+                    "entry": entry,
+                    "entry_total": 0.0,
+                    "weight": 0.0,
+                    "szi": 0.0,
+                    "notional": 0.0,
+                    "pnl": 0.0,
+                    "leverage_total": 0.0,
+                    "leverage_weight": 0.0,
+                    "margin": 0.0,
+                    "accounts": set(),
+                }
+                groups.append(match)
+            match["entry_total"] += entry * weight
+            match["weight"] += weight
+            match["szi"] += _num(row.get("szi"))
+            match["notional"] += abs(_num(row.get("notional")))
+            match["pnl"] += _num(row.get("pnl"))
+            notional = abs(_num(row.get("notional")))
+            leverage = _num(row.get("leverage"))
+            match["leverage_total"] += leverage * notional
+            match["leverage_weight"] += notional
+            match["margin"] += _num(row.get("margin"))
+            account = str(row.get("account") or "").strip()
+            if account:
+                match["accounts"].add(account)
+
+        result = []
+        for group in groups:
+            accounts = sorted(group["accounts"])
+            result.append(
+                {
+                    "coin": group["coin"],
+                    "side": group["side"],
+                    "szi": group["szi"],
+                    "size": abs(group["szi"]),
+                    "entry": group["entry_total"] / group["weight"] if group["weight"] else 0.0,
+                    "notional": group["notional"],
+                    "pnl": group["pnl"],
+                    "leverage": group["leverage_total"] / group["leverage_weight"] if group["leverage_weight"] else 0.0,
+                    "margin": group["margin"],
+                    "account_count": len(accounts),
+                    "accounts": accounts,
+                }
+            )
+        result.sort(key=lambda row: row["notional"], reverse=True)
+        return result
     def autohunt_data(self):
         now_ms = int(time.time() * 1000)
         processes = []
@@ -610,6 +744,39 @@ class WebApp:
                 }
             )
 
+        addresses = sorted(
+            {
+                str(account.get("address") or "").lower()
+                for process in processes
+                for account in process.get("accounts") or []
+                if account.get("address")
+            }
+        )
+
+        def fetch_positions(address):
+            try:
+                return address, self._autohunt_account_positions(address)
+            except Exception as exc:
+                print(f"[web] autohunt positions failed for {address}: {exc}")
+                return address, []
+
+        positions_by_address = {}
+        if addresses:
+            with concurrent.futures.ThreadPoolExecutor(max_workers=min(8, len(addresses))) as pool:
+                for address, positions in pool.map(fetch_positions, addresses):
+                    positions_by_address[address] = positions
+
+        for process in processes:
+            enriched = []
+            for account in process.get("accounts") or []:
+                address = str(account.get("address") or "").lower()
+                owner = str(account.get("alias") or "").strip() or address[:6] + "..." + address[-4:]
+                for position in positions_by_address.get(address, []):
+                    row = dict(position)
+                    row["account"] = owner
+                    enriched.append(row)
+            process["positions"] = self._cluster_autohunt_positions(enriched)
+            process["position_count"] = len(enriched)
         processes.sort(key=lambda row: (not row["enabled"], -row["last_run"], row["name"]))
         return {
             "type": "autohunt",
@@ -617,7 +784,7 @@ class WebApp:
             "collected": self.store.get_collected_accounts(),
             "generated_at": now_ms,
         }
-    def whale_zones(self, proc_name, coin, merge=1.0, fill_window_min=1440):
+    def whale_zones(self, proc_name, coin, merge=1.0, fill_window_min=1440, include_orders=True, include_fills=True, include_positions=False):
         """聚合 autohunt 收集账户在该币种上的普通挂单区间。"""
         configs = self.store.all_autohunt_configs()
         if not configs:
@@ -630,7 +797,10 @@ class WebApp:
         name = picked["name"]
         chat_id = picked["chat_id"]
 
-        cache_key = (name, coin, round(float(merge), 3), int(fill_window_min))
+        cache_key = (
+            name, coin, round(float(merge), 3), int(fill_window_min),
+            bool(include_orders), bool(include_fills), bool(include_positions),
+        )
         cached = self.whale_cache.get(cache_key)
         if cached and time.monotonic() - cached[0] < self.whale_cache_ttl:
             return cached[1]
@@ -638,6 +808,15 @@ class WebApp:
         accounts = self.store.get_auto_accounts(chat_id, name)[:40]
         addresses = [str(a.get("address") or "") for a in accounts if a.get("address")]
         api = self.monitor.api
+        account_labels = {
+            str(account.get("address") or "").lower(): (
+                str(account.get("alias") or "").strip()
+                or str(account.get("address") or "")[:6]
+                + "..."
+                + str(account.get("address") or "")[-4:]
+            )
+            for account in accounts
+        }
 
         dexes = set()
         try:
@@ -654,32 +833,58 @@ class WebApp:
         def fetch(address):
             collected_orders = []
             collected_fills = []
-            for dex in sorted(dexes):
-                try:
-                    orders = (
-                        api.frontend_open_orders(address)
-                        if dex == ""
-                        else api.frontend_open_orders(address, dex)
-                    )
-                except Exception:
-                    orders = []
-                collected_orders.extend(orders or [])
+            positions = []
+            if include_orders:
+                for dex in sorted(dexes):
+                    try:
+                        orders = (
+                            api.frontend_open_orders(address)
+                            if dex == ""
+                            else api.frontend_open_orders(address, dex)
+                        )
+                    except Exception:
+                        orders = []
+                    collected_orders.extend(orders or [])
 
-            try:
-                collected_fills = api.user_fills_by_time(address, fill_start, now_ms + 1000) or []
-            except Exception:
-                collected_fills = []
-            return collected_orders, collected_fills
+            if include_fills:
+                try:
+                    collected_fills = api.user_fills_by_time(
+                        address, fill_start, now_ms + 1000
+                    ) or []
+                except Exception:
+                    collected_fills = []
+
+            if include_positions:
+                try:
+                    positions = self._autohunt_account_positions(address)
+                except Exception:
+                    positions = []
+            return collected_orders, collected_fills, positions
 
         flat = []
         fill_flat = []
+        position_rows = []
         if addresses:
             with concurrent.futures.ThreadPoolExecutor(max_workers=min(8, len(addresses))) as pool:
                 for address, result in zip(addresses, pool.map(fetch, addresses)):
-                    orders, account_fills = result
+                    orders, account_fills, account_positions = result
                     for fill in account_fills or []:
                         fill["_account"] = address
                         fill_flat.append(fill)
+                    for position in account_positions or []:
+                        raw_coin = str(position.get("coin") or "")
+                        symbol = (
+                            raw_coin.rsplit(":", 1)[-1].upper()
+                            if ":" in raw_coin else raw_coin.upper()
+                        )
+                        if symbol != str(coin).upper():
+                            continue
+                        item = dict(position)
+                        item["account"] = account_labels.get(
+                            str(address).lower(), str(address)[:6] + "..." + str(address)[-4:]
+                        )
+                        position_rows.append(item)
+
                     for order in orders:
                         if order.get("isTrigger") or order.get("isPositionTpsl"):
                             continue
@@ -787,6 +992,10 @@ class WebApp:
                 )
         fill_zones.sort(key=lambda item: (item["accounts"], item["total_value"]), reverse=True)
         fill_zones = fill_zones[:30]
+        positions = (
+            self._cluster_autohunt_positions(position_rows)
+            if include_positions else []
+        )
         rows.sort(key=lambda item: (item["accounts"], item["total_value"]), reverse=True)
         rows = rows[:20]
         result = {
@@ -795,6 +1004,7 @@ class WebApp:
             "zones": rows,
             "order_zones": rows,
             "fill_zones": fill_zones,
+            "positions": positions,
         }
         self.whale_cache[cache_key] = (time.monotonic(), result)
         return result
@@ -1487,6 +1697,7 @@ class WebRequestHandler(BaseHTTPRequestHandler):
                         "network": self.app.config.network,
                         "version": __version__,
                         "accounts": self.app.accounts(),
+                        "autohunt_processes": self.app.autohunt_processes(),
                         "settings": self.app.public_settings(),
                     },
                 )
@@ -1511,6 +1722,9 @@ class WebRequestHandler(BaseHTTPRequestHandler):
                         (query.get("whale") or ["0"])[0] == "1",
                         (query.get("proc") or [""])[0],
                         (query.get("merge") or ["1"])[0],
+                        (query.get("whale_orders") or ["1"])[0] == "1",
+                        (query.get("whale_fills") or ["1"])[0] == "1",
+                        (query.get("whale_positions") or ["0"])[0] == "1",
                     ),
                 )
             elif path == "/api/settings":

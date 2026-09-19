@@ -929,8 +929,15 @@ class TelegramClient:
         )
         try:
             resp = self.opener.open(req, timeout=self.timeout)
-        except urllib.error.HTTPError:
-            raise
+        except urllib.error.HTTPError as exc:
+            try:
+                detail = exc.read().decode("utf-8", errors="replace").strip()
+            except Exception:
+                detail = ""
+            suffix = f": {detail}" if detail else ""
+            raise RuntimeError(
+                f"Telegram API {method} HTTP {exc.code}{suffix}"
+            ) from exc
         except urllib.error.URLError:
             if self.fallback_opener is None:
                 raise
@@ -964,7 +971,7 @@ class TelegramClient:
             payload["parse_mode"] = parse_mode
         if reply_markup is not None:
             payload["reply_markup"] = reply_markup
-        if parse_mode == "HTML":
+        if parse_mode and str(parse_mode).upper() == "HTML":
             try:
                 rich = {
                     "chat_id": chat_id,
@@ -976,6 +983,7 @@ class TelegramClient:
                 return self._call("sendRichMessage", rich)
             except Exception as exc:
                 print(f"[telegram] sendRichMessage 失败，回退旧格式: {exc}")
+                payload["text"] = _telegram_safe_html(text)
         return self._call("sendMessage", payload)
 
     def send_typing(self, chat_id):
@@ -998,7 +1006,7 @@ class TelegramClient:
             payload["parse_mode"] = parse_mode
         if reply_markup is not None:
             payload["reply_markup"] = reply_markup
-        if parse_mode == "HTML":
+        if parse_mode and str(parse_mode).upper() == "HTML":
             try:
                 rich = {
                     "chat_id": chat_id,
@@ -1012,7 +1020,13 @@ class TelegramClient:
                 if "message is not modified" in str(exc).lower():
                     return None
                 print(f"[telegram] editMessageText(rich) 失败，回退旧格式: {exc}")
-        return self._call("editMessageText", payload)
+                payload["text"] = _telegram_safe_html(text)
+        try:
+            return self._call("editMessageText", payload)
+        except Exception as exc:
+            if "message is not modified" in str(exc).lower():
+                return None
+            raise
 
     def delete_message(self, chat_id, message_id):
         return self._call(
@@ -1108,6 +1122,9 @@ class TelegramRouter:
             chats = [self.fallback_chat_id]
 
         for chat_id in dict.fromkeys(chats):
+            # __web__ 只是网页面板的虚拟订阅，不是 Telegram 会话。
+            if not chat_id or str(chat_id) == WEB_CHAT_ID:
+                continue
             if not self._should_notify_chat(event, chat_id):
                 continue
             if event.get("kind") == "fill":
@@ -6095,3 +6112,25 @@ class TelegramBot:
             self.client.answer_callback_query(callback_id)
 
         threading.Thread(target=work, daemon=True).start()
+
+
+def _telegram_safe_html(text):
+    """Convert formatter HTML to the subset supported by Telegram."""
+    if not text:
+        return text
+    for old, new in (
+        ("<table bordered compact>", ""),
+        ("<table>", ""),
+        ("</table>", ""),
+        ("<tr>", "\n"),
+        ("</tr>", ""),
+        ("<td colspan=\"3\">", " "),
+        ("<td colspan=\"4\">", " "),
+        ("<td>", " "),
+        ("</td>", " | "),
+        ("<mark>", "<b>"),
+        ("</mark>", "</b>"),
+        ("<br>", "\n"),
+    ):
+        text = text.replace(old, new)
+    return text

@@ -10,7 +10,7 @@
 </head>
 <body>
   <div class="app">
-    <aside id="sidebar" class="sidebar" aria-label="导航和账户">
+    <aside id="sidebar" class="sidebar" aria-label="导航">
       <div class="sidebar-top">
         <div class="brand">
           <span class="brand-mark">HL</span>
@@ -66,18 +66,7 @@
         </nav>
       </div>
 
-      <section class="accounts">
-        <div class="section-head">
-          <h2>账户</h2>
-          <button id="toggle-account-form" class="icon-button" title="添加账户" aria-label="添加账户">+</button>
-        </div>
-        <form id="account-form" class="account-form" hidden>
-          <input id="account-address" name="address" placeholder="0x..." autocomplete="off" spellcheck="false" required>
-          <input id="account-alias" name="alias" placeholder="命名" autocomplete="off">
-          <button type="submit">添加</button>
-        </form>
-        <div id="account-list" class="account-list"></div>
-      </section>
+      <div class="sidebar-account-hint">进入功能页后选择一个或多个账户</div>
 
       <div class="sidebar-foot">
         <span id="network-badge">MAINNET</span>
@@ -108,6 +97,8 @@
           <div class="panel-head">
             <div><h1>总览</h1><div class="panel-meta">账户与持仓</div></div>
           </div>
+
+          <div class="panel-account-slot"></div>
           <div class="panel-state"></div>
           <div class="panel-body"></div>
         </section>
@@ -125,6 +116,8 @@
               <button type="button" data-window="10080">1周</button>
             </div>
           </div>
+
+          <div class="panel-account-slot"></div>
           <div class="panel-state"></div>
           <div class="panel-body"></div>
         </section>
@@ -138,6 +131,8 @@
               <button type="button" data-level="coarse">粗</button>
             </div>
           </div>
+
+          <div class="panel-account-slot"></div>
           <div class="panel-state"></div>
           <div class="panel-body"></div>
         </section>
@@ -146,6 +141,8 @@
           <div class="panel-head">
             <div><h1>止盈止损</h1><div class="panel-meta">当前触发单</div></div>
           </div>
+
+          <div class="panel-account-slot"></div>
           <div class="panel-state"></div>
           <div class="panel-body"></div>
         </section>
@@ -154,6 +151,8 @@
           <div class="panel-head">
             <div><h1>历史</h1><div class="panel-meta">已平仓记录</div></div>
           </div>
+
+          <div class="panel-account-slot"></div>
           <div class="panel-state"></div>
           <div class="panel-body"></div>
         </section>
@@ -182,6 +181,8 @@
                 <span>全屏</span>
               </button>            </div>
           </div>
+
+          <div class="panel-account-slot"></div>
           <div class="panel-state"></div>
           <div class="panel-body">
             <div class="chart-layout">
@@ -212,6 +213,7 @@
                     <div class="overlay-toggles">
                       <button type="button" data-overlay="whaleOrders">挂单区间</button>
                       <button type="button" data-overlay="whaleFills">成交区间</button>
+                      <button type="button" data-overlay="whalePositions">持仓</button>
                     </div>
                   </div>
                 </div>                <div class="fill-window-control">
@@ -291,6 +293,8 @@
           <div class="panel-head">
             <div><h1>事件</h1><div class="panel-meta">本地监控记录</div></div>
           </div>
+
+          <div class="panel-account-slot"></div>
           <div class="panel-state"></div>
           <div class="panel-body"></div>
         </section>
