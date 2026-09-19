@@ -33,6 +33,7 @@ const state = {
 const els = {
   sidebar: document.getElementById("sidebar"),
   sidebarToggle: document.getElementById("sidebar-toggle"),
+  sidebarClose: document.getElementById("sidebar-close"),
   sidebarBackdrop: document.getElementById("sidebar-backdrop"),
   refresh: document.getElementById("refresh-button"),
   accountForm: document.getElementById("account-form"),
@@ -2646,6 +2647,7 @@ els.whaleToken.addEventListener("keydown", (event) => {
   runWhaleScan();
 });
 els.sidebarToggle.addEventListener("click", () => setSidebarOpen(!els.sidebar.classList.contains("open")));
+els.sidebarClose.addEventListener("click", () => setSidebarOpen(false));
 els.sidebarBackdrop.addEventListener("click", () => setSidebarOpen(false));
 
 els.accountFormToggle.addEventListener("click", () => {
