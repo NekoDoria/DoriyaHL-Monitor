@@ -250,6 +250,17 @@ button:focus-visible, input:focus-visible { outline: 2px solid var(--accent); ou
   white-space: nowrap;
 }
 .overlay-toggles button.active { color: var(--text); border-color: #3f7a69; background: var(--accent-soft); }
+.overlay-status { display: grid; gap: 4px; margin-top: 7px; }
+.overlay-status[hidden] { display: none !important; }
+.overlay-status-item { display: flex; align-items: center; gap: 7px; font-size: 11px; color: var(--muted); }
+.overlay-status-item i { flex: 0 0 auto; width: 6px; height: 6px; border-radius: 50%; background: var(--muted); }
+.overlay-status-item.loading { color: #d8e6ff; }
+.overlay-status-item.loading i { background: #6eaaff; animation: overlay-pulse 1s ease-in-out infinite; }
+.overlay-status-item.ready { color: #8df0cd; }
+.overlay-status-item.ready i { background: var(--accent); }
+.overlay-status-item.error { color: #ffb1b1; }
+.overlay-status-item.error i { background: var(--red); }
+@keyframes overlay-pulse { 50% { opacity: .35; transform: scale(.85); } }
 .chart-legend { display: grid; align-content: start; gap: 7px; flex: 1 1 auto; min-height: 0; }
 .legend-item { display: flex; align-items: center; gap: 8px; min-width: 0; font-size: 12px; color: #d5d5d5; }
 .legend-dot { flex: 0 0 auto; width: 8px; height: 8px; border-radius: 50%; }

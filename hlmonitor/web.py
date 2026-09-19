@@ -784,11 +784,17 @@ class WebApp:
             "collected": self.store.get_collected_accounts(),
             "generated_at": now_ms,
         }
-    def whale_zones(self, proc_name, coin, merge=1.0, fill_window_min=1440, include_orders=True, include_fills=True, include_positions=False):
+    def whale_zones(self, proc_name, coin, merge=1.0, fill_window_min=1440, include_orders=True, include_fills=True, include_positions=False, kind="all"):
         """聚合 autohunt 收集账户在该币种上的普通挂单区间。"""
         configs = self.store.all_autohunt_configs()
         if not configs:
             return None
+        kind = str(kind or "all").lower()
+        if kind not in {"orders", "fills", "positions", "all"}:
+            kind = "all"
+        include_orders = bool(include_orders) and kind in {"orders", "all"}
+        include_fills = bool(include_fills) and kind in {"fills", "all"}
+        include_positions = bool(include_positions) and kind in {"positions", "all"}
         picked = None
         wanted = str(proc_name or "").strip().lower()
         if wanted:
@@ -941,7 +947,7 @@ class WebApp:
                 continue
             item = dict(fill)
             item["_px"] = px
-            item["_account"] = address
+            item["_account"] = str(fill.get("_account") or "")
             item["_size"] = size
             fill_groups.setdefault((side, direction), []).append(item)
 
@@ -1007,6 +1013,45 @@ class WebApp:
             "positions": positions,
         }
         self.whale_cache[cache_key] = (time.monotonic(), result)
+        return result
+    def chart_overlay_data(self, kind, raw_coin, raw_fill_window_min="1440", raw_proc="", raw_merge="1"):
+        """按单一叠加类型返回 Autohunt 数据，便于前端渐进渲染。"""
+        kind = str(kind or "all").lower()
+        if kind not in {"orders", "fills", "positions"}:
+            kind = "all"
+        try:
+            fill_window_min = int(raw_fill_window_min)
+        except (TypeError, ValueError):
+            fill_window_min = 1440
+        fill_window_min = min(max(fill_window_min, 60), 10080)
+        try:
+            merge = float(raw_merge)
+        except (TypeError, ValueError):
+            merge = 1.0
+        merge = min(max(merge, 0.25), 4.0)
+        result = self.whale_zones(
+            str(raw_proc or ""),
+            str(raw_coin or "BTC").strip(),
+            merge,
+            fill_window_min,
+            include_orders=kind in {"orders", "all"},
+            include_fills=kind in {"fills", "all"},
+            include_positions=kind in {"positions", "all"},
+            kind=kind,
+        )
+        if not result:
+            return {
+                "type": "chart_overlays",
+                "kind": kind,
+                "process": "",
+                "account_count": 0,
+                "order_zones": [],
+                "fill_zones": [],
+                "positions": [],
+                "generated_at": int(time.time() * 1000),
+            }
+        result["type"] = "chart_overlays"
+        result["kind"] = kind
         return result
     def recent_events(self, raw_address=None, limit=50):
         address = normalize_address(raw_address) if raw_address else None
@@ -1711,6 +1756,17 @@ class WebRequestHandler(BaseHTTPRequestHandler):
                 self._send_json(200, self.app.report_data("tpsl", address))
             elif path == "/api/history":
                 self._send_json(200, self.app.report_data("history", address))
+            elif path == "/api/chart/overlay":
+                self._send_json(
+                    200,
+                    self.app.chart_overlay_data(
+                        (query.get("kind") or ["all"])[0],
+                        (query.get("coin") or ["BTC"])[0],
+                        (query.get("fill_window_min") or ["1440"])[0],
+                        (query.get("proc") or [""])[0],
+                        (query.get("merge") or ["1"])[0],
+                    ),
+                )
             elif path == "/api/chart":
                 self._send_json(
                     200,

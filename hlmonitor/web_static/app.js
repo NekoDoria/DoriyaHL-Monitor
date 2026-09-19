@@ -22,6 +22,9 @@ const state = {
   theme: null,
   overlays: { orders: true, fills: true, tpsl: true, volume: true, whaleOrders: false, whaleFills: false, whalePositions: false },
   busy: false,
+  loadPending: false,
+  chartOverlayToken: 0,
+  chartOverlayStatus: {},
   chart: null,
   candleSeries: null,
   volumeSeries: null,
@@ -65,6 +68,7 @@ const els = {
   chartFullscreen: document.getElementById("chart-fullscreen"),
   chartSideToggle: document.getElementById("chart-side-toggle"),
   autohuntProcess: document.getElementById("autohunt-process"),
+  chartOverlayStatus: document.getElementById("chart-overlay-status"),
   chartFillWindow: document.getElementById("chart-fill-window"),
   fillWindowValue: document.getElementById("fill-window-value"),
   mergeSlider: document.getElementById("merge-slider"),
@@ -427,7 +431,7 @@ function renderAccountPicker(view) {
     procSelect.addEventListener("change", () => {
       state.autohuntProc = procSelect.value;
       localStorage.setItem("hl.autohuntProc", state.autohuntProc);
-      loadView(true);
+      ensureChartOverlays(true);
     });
     procControl.append(procHead, procSelect);
     list.before(procControl);
@@ -1181,13 +1185,16 @@ function legendChip(label, value, color) {
   return item;
 }
 
-function drawChartOverlays(data) {
+function drawChartOverlays(data, options = {}) {
+  const preservePopups = options.preservePopups === true;
   clearPriceLines();
   clearOrderZoneOverlays();
-  hidePositionTooltip();
-  hidePositionPopup();
-  hideZoneTooltip();
-  hideZonePopup();
+  if (!preservePopups) {
+    hidePositionTooltip();
+    hidePositionPopup();
+    hideZoneTooltip();
+    hideZonePopup();
+  }
   els.chartLegend.replaceChildren();
   const visibleOrders = state.overlays.orders ? data.order_zones.slice(0, 12) : [];
   const visibleFills = state.overlays.fills ? data.fill_zones.slice(0, 12) : [];
@@ -1290,6 +1297,7 @@ function renderChart(data) {
     });
   }
   state.chart.applyOptions({ width: els.priceChart.clientWidth, height: els.priceChart.clientHeight });
+  ensureChartOverlays(true);
 }
 
 function renderChartSymbols(data) {
@@ -2625,16 +2633,7 @@ function endpoint(view, rawAddress = "") {
   if (view === "chart") {
     const coin = encodeURIComponent(state.chartCoin || "BTC");
     const fillWindow = Number(state.fillWindow) || 1440;
-    const wantsWhale = state.overlays.whaleOrders || state.overlays.whaleFills || state.overlays.whalePositions;
-    const mergeParam = `&merge=${state.merge}`;
-    if (!wantsWhale) {
-      return `/api/chart?address=${address}&coin=${coin}&interval=${state.chartInterval}&fill_window_min=${fillWindow}${mergeParam}`;
-    }
-    const proc = encodeURIComponent(state.autohuntProc || "");
-    const whaleOrders = state.overlays.whaleOrders ? 1 : 0;
-    const whaleFills = state.overlays.whaleFills ? 1 : 0;
-    const whalePositions = state.overlays.whalePositions ? 1 : 0;
-    return `/api/chart?address=${address}&coin=${coin}&interval=${state.chartInterval}&fill_window_min=${fillWindow}&whale=1&proc=${proc}&whale_orders=${whaleOrders}&whale_fills=${whaleFills}&whale_positions=${whalePositions}${mergeParam}`;
+    return `/api/chart?address=${address}&coin=${coin}&interval=${state.chartInterval}&fill_window_min=${fillWindow}&merge=${state.merge}`;
   }
   if (view === "tpsl") return `/api/tpsl?address=${address}`;
   if (view === "history") return `/api/history?address=${address}`;
@@ -2645,6 +2644,81 @@ function endpoint(view, rawAddress = "") {
   return `/api/events?address=${address}&limit=100`;
 }
 
+const CHART_OVERLAY_KINDS = ["orders", "fills", "positions"];
+const CHART_OVERLAY_LABELS = { orders: "挂单区间", fills: "成交区间", positions: "持仓" };
+const CHART_OVERLAY_STATE_KEYS = { orders: "whaleOrders", fills: "whaleFills", positions: "whalePositions" };
+
+function activeChartOverlayKinds() {
+  return CHART_OVERLAY_KINDS.filter((kind) => state.overlays[CHART_OVERLAY_STATE_KEYS[kind]]);
+}
+
+function chartOverlayEndpoint(kind) {
+  const coin = encodeURIComponent(state.chartCoin || "BTC");
+  const fillWindow = Number(state.fillWindow) || 1440;
+  const proc = encodeURIComponent(state.autohuntProc || "");
+  return `/api/chart/overlay?kind=${kind}&coin=${coin}&fill_window_min=${fillWindow}&proc=${proc}&merge=${state.merge}`;
+}
+
+function renderChartOverlayStatus() {
+  const node = els.chartOverlayStatus;
+  if (!node) return;
+  const kinds = activeChartOverlayKinds();
+  if (!kinds.length) {
+    node.replaceChildren();
+    node.hidden = true;
+    return;
+  }
+  node.hidden = false;
+  node.replaceChildren();
+  for (const kind of kinds) {
+    const status = state.chartOverlayStatus[kind] || "idle";
+    const label = CHART_OVERLAY_LABELS[kind];
+    const text = status === "loading"
+      ? `${label} 加载中`
+      : status === "ready"
+        ? `${label} 已加载`
+        : status === "error"
+          ? `${label} 加载失败`
+          : label;
+    const item = make("div", `overlay-status-item ${status}`);
+    item.append(make("i"), make("span", "", text));
+    node.append(item);
+  }
+}
+
+async function ensureChartOverlays(force = false) {
+  const kinds = activeChartOverlayKinds();
+  const token = ++state.chartOverlayToken;
+  const nextStatus = {};
+  for (const kind of kinds) {
+    nextStatus[kind] = force ? "loading" : (state.chartOverlayStatus[kind] || "loading");
+  }
+  state.chartOverlayStatus = nextStatus;
+  renderChartOverlayStatus();
+  if (!state.chartData) return;
+  const tasks = kinds.filter((kind) => force || state.chartOverlayStatus[kind] !== "ready");
+  if (!tasks.length) return;
+  await Promise.all(tasks.map(async (kind) => {
+    try {
+      const data = await request(chartOverlayEndpoint(kind));
+      if (token !== state.chartOverlayToken || !state.chartData) return;
+      state.chartData.whale_process = data.process || "";
+      state.chartData.whale_account_count = data.account_count || 0;
+      if (kind === "orders") state.chartData.whale_order_zones = data.order_zones || [];
+      if (kind === "fills") state.chartData.whale_fill_zones = data.fill_zones || [];
+      if (kind === "positions") state.chartData.whale_positions = data.positions || [];
+      state.chartOverlayStatus[kind] = "ready";
+      renderChartOverlayStatus();
+      drawChartOverlays(state.chartData, { preservePopups: true });
+      updatePositionOverlay();
+      updateOrderZoneOverlays();
+    } catch (_) {
+      if (token !== state.chartOverlayToken) return;
+      state.chartOverlayStatus[kind] = "error";
+      renderChartOverlayStatus();
+    }
+  }));
+}
 function setView(view) {
   state.view = view;
   for (const button of els.viewNav.querySelectorAll(".nav-button")) {
@@ -2782,7 +2856,10 @@ function aggregateViewData(view, items, addresses) {
 }
 
 async function loadView(force = false) {
-  if (state.busy) return;
+  if (state.busy) {
+    state.loadPending = true;
+    return;
+  }
   const view = state.view;
   const addresses = selectedAddresses();
   if (["whale", "whale-tx", "settings"].includes(view)) {
@@ -2811,6 +2888,10 @@ async function loadView(force = false) {
   } finally {
     state.busy = false;
     els.refresh.disabled = false;
+    if (state.loadPending) {
+      state.loadPending = false;
+      setTimeout(() => loadView(true), 0);
+    }
   }
 }
 
@@ -2851,11 +2932,20 @@ els.ordersLevel.addEventListener("click", (event) => {
   if (state.view === "orders") loadView(true);
 });
 
+let chartReloadTimer = null;
+function scheduleChartLoad(delay = 120) {
+  if (state.view !== "chart") return;
+  if (chartReloadTimer) clearTimeout(chartReloadTimer);
+  chartReloadTimer = setTimeout(() => {
+    chartReloadTimer = null;
+    loadView(true);
+  }, delay);
+}
 els.chartFillWindow.addEventListener("change", () => {
   state.fillWindow = els.chartFillWindow.value;
   localStorage.setItem("hl.fillWindow", state.fillWindow);
   syncFillWindowLabel();
-  if (state.view === "chart") loadView(true);
+  if (state.view === "chart") scheduleChartLoad();
 });
 
 els.chartInterval.addEventListener("click", (event) => {
@@ -2863,14 +2953,14 @@ els.chartInterval.addEventListener("click", (event) => {
   if (!button) return;
   state.chartInterval = button.dataset.interval;
   for (const node of els.chartInterval.querySelectorAll("button")) node.classList.toggle("active", node === button);
-  if (state.view === "chart") loadView(true);
+  if (state.view === "chart") scheduleChartLoad();
 });
 
 els.chartSymbol.addEventListener("change", () => {
   state.chartCoin = els.chartSymbol.value;
   hidePositionPopup();
   hidePositionTooltip();
-  if (state.view === "chart") loadView(true);
+  if (state.view === "chart") scheduleChartLoad();
 });
 
 els.chartOverlays.addEventListener("click", (event) => {
@@ -2881,7 +2971,17 @@ els.chartOverlays.addEventListener("click", (event) => {
   button.classList.toggle("active", state.overlays[key]);
   if (state.view !== "chart") return;
   if (key === "whaleOrders" || key === "whaleFills" || key === "whalePositions") {
-    loadView(true);
+    if (state.overlays[key]) {
+      ensureChartOverlays(false);
+    } else if (state.chartData) {
+      if (key === "whaleOrders") state.chartData.whale_order_zones = [];
+      if (key === "whaleFills") state.chartData.whale_fill_zones = [];
+      if (key === "whalePositions") state.chartData.whale_positions = [];
+      drawChartOverlays(state.chartData, { preservePopups: true });
+      updatePositionOverlay();
+      updateOrderZoneOverlays();
+    }
+    renderChartOverlayStatus();
     return;
   }
   if (state.chartData) {
@@ -2964,7 +3064,7 @@ els.mergeSlider.addEventListener("input", () => {
   syncMergeLabel();
   if (state.view !== "chart") return;
   if (mergeTimer) clearTimeout(mergeTimer);
-  mergeTimer = setTimeout(() => loadView(true), 450);
+  mergeTimer = setTimeout(() => ensureChartOverlays(true), 450);
 });
 syncMergeLabel();
 els.chartRefresh.addEventListener("click", () => {
