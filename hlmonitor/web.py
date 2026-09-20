@@ -8,6 +8,7 @@ import json
 import math
 import mimetypes
 import re
+import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -15,7 +16,7 @@ from urllib.parse import parse_qs, urlparse
 
 from . import __version__
 from .config import Config, load_config, normalize_address
-from .hunter import _build_coin_dex_map
+from .hunter import _build_coin_dex_map, _max_drawdown, _window_perf, fetch_leaderboard, fetch_pnl_history, scan
 from .brief import cluster_open_orders, interval_stats
 from .format import AMOUNT_STYLES, set_amount_style
 from .monitor import AddressMonitor
@@ -93,6 +94,13 @@ class WebApp:
         self.chart_cache_ttl = 15.0
         self.whale_cache = {}
         self.whale_cache_ttl = 60.0
+        self.autohunt_position_cache = {}
+        self.autohunt_position_cache_lock = threading.Lock()
+        self.account_detail_cache = {}
+        self.account_detail_lock = threading.Lock()
+        self.autohunt_position_cache_ttl = 60.0
+        self.hunt_jobs = {}
+        self.hunt_jobs_lock = threading.Lock()
         self._holder_adapter_cache = None
         self.holder_scan_cache = {}
         self.holder_scan_ttl = 60.0
@@ -684,7 +692,7 @@ class WebApp:
             )
         result.sort(key=lambda row: row["notional"], reverse=True)
         return result
-    def autohunt_data(self):
+    def _autohunt_processes(self):
         now_ms = int(time.time() * 1000)
         processes = []
         for entry in self.store.all_autohunt_configs():
@@ -730,6 +738,7 @@ class WebApp:
                 {
                     "name": name,
                     "chat_id": chat_id,
+                    "key": f"{chat_id}:{name}",
                     "coins": coins,
                     "limit": limit,
                     "interval_h": interval_h,
@@ -743,22 +752,37 @@ class WebApp:
                     "accounts": accounts,
                 }
             )
+        processes.sort(key=lambda row: (not row["enabled"], -row["last_run"], row["name"]))
+        return processes
 
-        addresses = sorted(
-            {
-                str(account.get("address") or "").lower()
-                for process in processes
-                for account in process.get("accounts") or []
-                if account.get("address")
-            }
-        )
+    def _cached_autohunt_positions(self, address):
+        """读取单个账户持仓；成功/失败都短暂缓存，避免页面刷新触发请求风暴。"""
+        key = str(address or "").lower()
+        now = time.monotonic()
+        with self.autohunt_position_cache_lock:
+            cached = self.autohunt_position_cache.get(key)
+            if cached and now - cached[0] < self.autohunt_position_cache_ttl:
+                return cached[1]
+
+        try:
+            positions = self._autohunt_account_positions(key)
+        except Exception as exc:
+            print(f"[web] autohunt positions failed for {key}: {exc}")
+            positions = []
+        with self.autohunt_position_cache_lock:
+            self.autohunt_position_cache[key] = (time.monotonic(), positions)
+        return positions
+
+    def _attach_autohunt_positions(self, processes):
+        addresses = sorted({
+            str(account.get("address") or "").lower()
+            for process in processes
+            for account in process.get("accounts") or []
+            if account.get("address")
+        })
 
         def fetch_positions(address):
-            try:
-                return address, self._autohunt_account_positions(address)
-            except Exception as exc:
-                print(f"[web] autohunt positions failed for {address}: {exc}")
-                return address, []
+            return address, self._cached_autohunt_positions(address)
 
         positions_by_address = {}
         if addresses:
@@ -777,12 +801,505 @@ class WebApp:
                     enriched.append(row)
             process["positions"] = self._cluster_autohunt_positions(enriched)
             process["position_count"] = len(enriched)
-        processes.sort(key=lambda row: (not row["enabled"], -row["last_run"], row["name"]))
+        return {process["key"]: process["positions"] for process in processes}
+
+    def autohunt_data(self, include_positions=True):
+        processes = self._autohunt_processes()
+        positions = self._attach_autohunt_positions(processes) if include_positions else {}
         return {
             "type": "autohunt",
             "processes": processes,
             "collected": self.store.get_collected_accounts(),
+            "generated_at": int(time.time() * 1000),
+        }
+
+    @staticmethod
+    def _account_window_ms(window):
+        return {
+            "24h": 24 * 3600_000,
+            "48h": 48 * 3600_000,
+            "7d": 7 * 24 * 3600_000,
+            "30d": 30 * 24 * 3600_000,
+            "all": 0,
+        }.get(str(window or "24h").lower(), 24 * 3600_000)
+
+    def _account_call(self, label, func, default):
+        try:
+            return func()
+        except Exception as exc:
+            print(f"[web] account detail {label} failed: {exc}")
+            return default
+
+    @staticmethod
+    def _downsample_points(rows, cap=1200):
+        rows = sorted(rows, key=lambda row: row[0])
+        if len(rows) <= cap:
+            return [{"time": ts, "pnl": value} for ts, value in rows]
+        step = (len(rows) - 1) / (cap - 1)
+        return [
+            {"time": rows[min(len(rows) - 1, round(index * step))][0], "pnl": rows[min(len(rows) - 1, round(index * step))][1]}
+            for index in range(cap)
+        ]
+
+    @staticmethod
+    def _portfolio_series(portfolio, key):
+        if not isinstance(portfolio, list):
+            return [], 0.0, 0.0, 0.0
+        for item in portfolio:
+            if not (isinstance(item, list) and item[0] == key and isinstance(item[1], dict)):
+                continue
+            rows = []
+            for point in item[1].get("pnlHistory") or []:
+                try:
+                    rows.append((int(point[0]), _num(point[1])))
+                except (TypeError, ValueError, IndexError):
+                    continue
+            rows.sort()
+            values = [row[1] for row in rows]
+            vlm = _num(item[1].get("vlm"))
+            return rows, (values[-1] if values else 0.0), (values[0] if values else 0.0), vlm
+        return [], 0.0, 0.0, 0.0
+
+    @staticmethod
+    def _fill_notional(row):
+        try:
+            return abs(float(row.get("px", 0)) * float(row.get("sz", 0)))
+        except (TypeError, ValueError):
+            return 0.0
+
+    @staticmethod
+    def _fills_stats(rows):
+        stats = {
+            "count": len(rows), "volume": 0.0, "realized_pnl": 0.0,
+            "fees": 0.0, "win_count": 0, "lose_count": 0,
+            "by_coin": {},
+        }
+        for row in rows:
+            notional = WebApp._fill_notional(row)
+            pnl = _num(row.get("closedPnl"))
+            fee = abs(_num(row.get("fee")))
+            coin = str(row.get("coin") or "?")
+            stats["volume"] += notional
+            stats["realized_pnl"] += pnl
+            stats["fees"] += fee
+            if pnl > 1e-9:
+                stats["win_count"] += 1
+            elif pnl < -1e-9:
+                stats["lose_count"] += 1
+            item = stats["by_coin"].setdefault(coin, {"coin": coin, "count": 0, "volume": 0.0, "pnl": 0.0})
+            item["count"] += 1
+            item["volume"] += notional
+            item["pnl"] += pnl
+        closed = stats["win_count"] + stats["lose_count"]
+        stats["win_rate"] = stats["win_count"] / closed if closed else 0.0
+        stats["by_coin"] = sorted(stats["by_coin"].values(), key=lambda row: row["volume"], reverse=True)
+        return stats
+
+    def account_detail_data(self, raw_address, raw_window="24h"):
+        """聚合单个 Hyperliquid 账户的 Coinglass 式详情数据。"""
+        address = normalize_address(raw_address)
+        window = str(raw_window or "24h").lower()
+        if window not in {"24h", "48h", "7d", "30d", "all"}:
+            window = "24h"
+        cache_key = f"{address}:{window}"
+        now_ms = int(time.time() * 1000)
+        with self.account_detail_lock:
+            cached = self.account_detail_cache.get(cache_key)
+            if cached and now_ms - cached["generated_at"] < 30_000:
+                return cached
+
+        window_ms = self._account_window_ms(window)
+        month_start = now_ms - 30 * 24 * 3600_000
+        fetch_all = window == "all"
+
+        def fetch_portfolio():
+            return self.monitor.api.portfolio(address) or []
+
+        def fetch_state():
+            return self.monitor.api.clearinghouse_state(address) or {}
+
+        def fetch_spot():
+            return self.monitor.api.spot_state(address) or {}
+
+        def fetch_orders():
+            return self.monitor.api.frontend_open_orders(address) or []
+
+        def fetch_fills():
+            if fetch_all:
+                return self.monitor.api.user_fills(address) or []
+            return self.monitor.api.user_fills_by_time(address, month_start) or []
+
+        def fetch_ledger():
+            return self.monitor.api.user_non_funding_ledger_updates(address) or []
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=6) as pool:
+            futures = {
+                "portfolio": pool.submit(fetch_portfolio),
+                "state": pool.submit(fetch_state),
+                "spot": pool.submit(fetch_spot),
+                "orders": pool.submit(fetch_orders),
+                "fills": pool.submit(fetch_fills),
+                "ledger": pool.submit(fetch_ledger),
+            }
+            portfolio = futures["portfolio"].result()
+            state = futures["state"].result()
+            spot = futures["spot"].result()
+            raw_orders = futures["orders"].result()
+            all_fills = futures["fills"].result()
+            ledger = futures["ledger"].result()
+
+        fills_24h = [row for row in all_fills if int(_num(row.get("time"))) >= now_ms - 24 * 3600_000]
+        fills_48h = [row for row in all_fills if int(_num(row.get("time"))) >= now_ms - 48 * 3600_000]
+        fills_7d = [row for row in all_fills if int(_num(row.get("time"))) >= now_ms - 7 * 24 * 3600_000]
+        fills_30d = [row for row in all_fills if int(_num(row.get("time"))) >= month_start]
+        selected_fills = {
+            "24h": fills_24h, "48h": fills_48h, "7d": fills_7d,
+            "30d": fills_30d, "all": all_fills,
+        }[window]
+        selected_stats = self._fills_stats(selected_fills)
+
+        all_series, total_pnl, portfolio_start, all_volume = self._portfolio_series(portfolio, "allTime")
+        if window == "24h":
+            chart_rows, period_portfolio_pnl, _, _ = self._portfolio_series(portfolio, "day")
+        elif window == "7d":
+            chart_rows, period_portfolio_pnl, _, _ = self._portfolio_series(portfolio, "week")
+        elif window == "30d":
+            chart_rows, period_portfolio_pnl, _, _ = self._portfolio_series(portfolio, "month")
+        elif window == "48h":
+            ordered = sorted(selected_fills, key=lambda row: _num(row.get("time")))
+            running = 0.0
+            chart_rows = []
+            for row in ordered:
+                running += _num(row.get("closedPnl"))
+                chart_rows.append((int(_num(row.get("time"))), running))
+            period_portfolio_pnl = selected_stats["realized_pnl"]
+        else:
+            chart_rows, period_portfolio_pnl, _, _ = self._portfolio_series(portfolio, "allTime")
+            chart_rows = all_series
+        drawdown_usd, drawdown_pct = _max_drawdown([row[1] for row in chart_rows])
+        if not chart_rows:
+            chart_rows = all_series
+
+        margin = state.get("marginSummary") or {}
+        positions = []
+        for item in state.get("assetPositions") or []:
+            if not isinstance(item, dict):
+                continue
+            position = item.get("position") or item
+            szi = _num(position.get("szi"))
+            if not str(position.get("coin") or "").strip() or abs(szi) <= 0:
+                continue
+            leverage = position.get("leverage") or {}
+            positions.append({
+                "coin": self.monitor.coin_label(str(position.get("coin"))),
+                "side": "做多" if szi > 0 else "做空",
+                "szi": szi,
+                "size": abs(szi),
+                "entry": _num(position.get("entryPx")),
+                "notional": abs(_num(position.get("positionValue"))),
+                "pnl": _num(position.get("unrealizedPnl")),
+                "roe_pct": _num(position.get("returnOnEquity")) * 100,
+                "leverage": leverage.get("value") if isinstance(leverage, dict) else leverage,
+                "margin": _num(position.get("marginUsed")),
+                "liquidation": _num(position.get("liquidationPx")),
+                "funding_since_open": _num((position.get("cumFunding") or {}).get("sinceOpen")) if isinstance(position.get("cumFunding"), dict) else 0.0,
+            })
+        positions.sort(key=lambda row: row["notional"], reverse=True)
+
+        position_pie = [{"name": row["coin"], "value": row["notional"]} for row in positions]
+        volume_pie = [{"name": row["coin"], "value": row["volume"]} for row in selected_stats["by_coin"]]
+        pnl_pie_raw = sorted(selected_stats["by_coin"], key=lambda row: abs(row["pnl"]), reverse=True)
+        pnl_pie = [{"name": row["coin"], "value": row["pnl"]} for row in pnl_pie_raw]
+
+        orders = []
+        for row in self.monitor._extract_normal_orders(raw_orders):
+            side = str(row.get("side") or "").upper()
+            orders.append({
+                "time": int(_num(row.get("timestamp") or row.get("time"))),
+                "coin": self.monitor.coin_label(str(row.get("coin") or "?")),
+                "side": "买入" if side == "B" else "卖出" if side == "A" else str(row.get("side") or "-"),
+                "price": _num(row.get("limitPx")),
+                "size": abs(_num(row.get("sz"))),
+                "original_size": abs(_num(row.get("origSz"))),
+                "notional": abs(_num(row.get("limitPx")) * _num(row.get("sz"))),
+                "reduce_only": bool(row.get("reduceOnly")),
+                "oid": row.get("oid"),
+            })
+        orders.sort(key=lambda row: row["time"], reverse=True)
+
+        spot_balances = []
+        for item in spot.get("balances") or []:
+            total = _num(item.get("total"))
+            if abs(total) <= 0:
+                continue
+            coin = str(item.get("coin") or "?")
+            spot_balances.append({
+                "coin": self.monitor.coin_label(coin),
+                "total": total,
+                "available": max(0.0, total - _num(item.get("hold"))),
+                "hold": _num(item.get("hold")),
+                "entry_value": _num(item.get("entryNtl")),
+            })
+        spot_balances.sort(key=lambda row: row["entry_value"], reverse=True)
+
+        transfers = []
+        for row in ledger:
+            delta = row.get("delta") or {}
+            kind = str(delta.get("type") or "").lower()
+            source_user = str(delta.get("user") or "").lower()
+            destination = str(delta.get("destination") or "").lower()
+            if kind == "deposit":
+                direction = "充值"
+            elif kind in {"withdraw", "send"}:
+                direction = "提现" if source_user == address and destination != address else "充值" if destination == address else "转账"
+            else:
+                direction = kind or "转账"
+            transfers.append({
+                "time": int(_num(row.get("time"))),
+                "direction": direction,
+                "token": str(delta.get("token") or "USDC"),
+                "amount": _num(delta.get("usdcValue", delta.get("amount"))),
+                "fee": abs(_num(delta.get("fee"))),
+                "counterparty": destination if source_user == address else source_user,
+                "hash": row.get("hash"),
+            })
+        transfers.sort(key=lambda row: row["time"], reverse=True)
+
+        collected = self.store.get_collected_accounts()
+        account_info = next((row for row in collected if row["address"] == address), None)
+        result = {
+            "type": "account_detail",
+            "address": address,
+            "window": window,
+            "account": account_info,
+            "summary": {
+                "account_value": _num(margin.get("accountValue")),
+                "margin_used": _num(margin.get("totalMarginUsed")),
+                "notional": _num(margin.get("totalNtlPos")),
+                "withdrawable": _num(state.get("withdrawable")),
+                "total_pnl": total_pnl,
+                "pnl_24h": self._fills_stats(fills_24h)["realized_pnl"],
+                "pnl_48h": self._fills_stats(fills_48h)["realized_pnl"],
+                "pnl_7d": self._fills_stats(fills_7d)["realized_pnl"],
+                "pnl_30d": self._fills_stats(fills_30d)["realized_pnl"],
+                "period_pnl": selected_stats["realized_pnl"],
+                "period_volume": selected_stats["volume"],
+                "all_volume": all_volume,
+                "trade_count": selected_stats["count"],
+                "win_rate": selected_stats["win_rate"],
+                "fees": selected_stats["fees"],
+                "max_drawdown_usd": drawdown_usd,
+                "max_drawdown_pct": drawdown_pct,
+                "position_count": len(positions),
+                "order_count": len(orders),
+            },
+            "pnl_series": self._downsample_points(chart_rows),
+            "pies": {
+                "positions": position_pie,
+                "volume": volume_pie,
+                "pnl": pnl_pie,
+            },
+            "positions": positions,
+            "fills": sorted(selected_fills, key=lambda row: _num(row.get("time")), reverse=True)[:200],
+            "orders": orders[:200],
+            "spot": spot_balances,
+            "transfers": transfers[:200],
             "generated_at": now_ms,
+        }
+        with self.account_detail_lock:
+            for key in list(self.account_detail_cache)[:-39]:
+                self.account_detail_cache.pop(key, None)
+            self.account_detail_cache[cache_key] = result
+        return result
+    def autohunt_positions_data(self):
+        processes = self._autohunt_processes()
+        positions = self._attach_autohunt_positions(processes)
+        return {
+            "type": "autohunt_positions",
+            "positions": positions,
+            "generated_at": int(time.time() * 1000),
+        }
+    @staticmethod
+    def _hunt_coin_list(value):
+        if isinstance(value, str):
+            values = re.split(r"[,，\s]+", value)
+        elif isinstance(value, (list, tuple)):
+            values = value
+        else:
+            values = []
+        return sorted({
+            str(item).strip().upper()
+            for item in values
+            if str(item).strip() and not str(item).strip().lower().startswith("0x")
+        })
+
+    def autohunt_leaderboard_search(self, query, limit=30):
+        """直接搜索 Hyperliquid 排行榜，而不仅限于本地已收集账户。"""
+        term = str(query or "").strip().lower()
+        limit = min(100, max(1, int(limit or 30)))
+        if len(term) < 2:
+            return []
+        rows = fetch_leaderboard(self.config.network, self.config.proxy_url)
+        matches = []
+        for row in rows:
+            address = str(row.get("ethAddress") or "").lower()
+            alias = str(row.get("displayName") or "")
+            if term not in address and term not in alias.lower():
+                continue
+            perf = _window_perf(row, "allTime")
+            matches.append({
+                "address": address,
+                "alias": alias,
+                "account_value": _num(row.get("accountValue")),
+                "volume": perf["vlm"],
+                "pnl": perf["pnl"],
+                "roi": perf["roi"] * 100,
+                "source": "leaderboard",
+            })
+        matches.sort(key=lambda row: (
+            not row["address"].startswith(term),
+            not str(row["alias"]).lower().startswith(term),
+            -row["pnl"],
+        ))
+        return matches[:limit]
+
+    def start_autohunt_hunt(self, limit=0, coins=None, swing=False):
+        """在后台执行 Telegram /hunt 的同一套排行榜粗筛和成交精算。"""
+        try:
+            max_results = min(100, max(0, int(limit or 0)))
+        except (TypeError, ValueError):
+            max_results = 0
+        coin_list = self._hunt_coin_list(coins)
+        job_id = f"{int(time.time() * 1000)}-{time.time_ns() % 100000}"
+        job = {
+            "type": "autohunt_hunt",
+            "job_id": job_id,
+            "status": "running",
+            "limit": max_results,
+            "coins": coin_list,
+            "swing": bool(swing),
+            "progress_done": 0,
+            "progress_total": 0,
+            "scanned_count": 0,
+            "results": [],
+            "error": "",
+            "started_at": int(time.time() * 1000),
+            "finished_at": 0,
+        }
+
+        def progress(done, total, address):
+            with self.hunt_jobs_lock:
+                job["progress_done"] = int(done or 0)
+                job["progress_total"] = int(total or 0)
+
+        def work():
+            try:
+                scanned = []
+                results = scan(
+                    self.config,
+                    self.monitor.api,
+                    progress=progress,
+                    coins=coin_list or None,
+                    swing_mode=bool(swing),
+                    max_results=max_results if max_results > 0 else None,
+                    scanned_out=scanned,
+                )
+                for item in results:
+                    self.store.upsert_collected_account(item)
+                with self.hunt_jobs_lock:
+                    job.update({
+                        "status": "success",
+                        "results": results,
+                        "scanned_count": len(scanned),
+                        "finished_at": int(time.time() * 1000),
+                    })
+            except Exception as exc:
+                with self.hunt_jobs_lock:
+                    job.update({
+                        "status": "error",
+                        "error": str(exc),
+                        "finished_at": int(time.time() * 1000),
+                    })
+
+        with self.hunt_jobs_lock:
+            for old_id in list(self.hunt_jobs)[:-19]:
+                self.hunt_jobs.pop(old_id, None)
+            self.hunt_jobs[job_id] = job
+        threading.Thread(target=work, daemon=True).start()
+        return dict(job)
+
+    def autohunt_hunt_status(self, job_id):
+        with self.hunt_jobs_lock:
+            job = self.hunt_jobs.get(str(job_id or ""))
+        if not job:
+            return {"type": "autohunt_hunt", "status": "not_found", "job_id": job_id}
+        return dict(job)
+
+    def autohunt_pnl_data(self, raw_address):
+        """读取账户的全时段累计盈亏，供 Autohunt 页面绘制收益曲线。"""
+        address = normalize_address(raw_address)
+        collected = self.store.get_collected_accounts()
+        account = next((row for row in collected if row["address"] == address), None)
+
+        if not account:
+            for entry in self.store.all_autohunt_configs():
+                for row in self.store.get_auto_accounts(entry["chat_id"], entry["name"]):
+                    if str(row.get("address") or "").lower() == address:
+                        account = {
+                            "address": address,
+                            "alias": row.get("alias") or "",
+                            "account_value": _num(row.get("account_value")),
+                            "volume": 0.0,
+                            "pnl": 0.0,
+                            "roi": 0.0,
+                            "win_rate": 0.0,
+                            "weighted_win_rate": 0.0,
+                            "profit_factor": 0.0,
+                            "score": 0.0,
+                            "sample_size": 0,
+                            "scanned_at": int(row.get("scanned_at") or 0),
+                        }
+                        break
+                if account:
+                    break
+
+        history = fetch_pnl_history(self.monitor.api, address, retries=2)
+        rows = []
+        for point in history or []:
+            try:
+                ts = int(point[0])
+                value = float(point[1])
+                if ts > 0 and math.isfinite(value):
+                    rows.append((ts, value))
+            except (TypeError, ValueError, IndexError):
+                continue
+        rows.sort(key=lambda row: row[0])
+
+        values = [row[1] for row in rows]
+        drawdown_usd, drawdown_pct = _max_drawdown(values)
+        chart_rows = rows
+        if len(chart_rows) > 1200:
+            step = (len(chart_rows) - 1) / 1199
+            chart_rows = [chart_rows[min(len(chart_rows) - 1, round(index * step))] for index in range(1200)]
+
+        return {
+            "type": "autohunt_pnl",
+            "address": address,
+            "account": account,
+            "points": [{"time": ts, "pnl": value} for ts, value in chart_rows],
+            "metrics": {
+                "current": values[-1] if values else None,
+                "start": values[0] if values else None,
+                "change": values[-1] - values[0] if values else None,
+                "minimum": min(values) if values else None,
+                "maximum": max(values) if values else None,
+                "max_drawdown_usd": drawdown_usd,
+                "max_drawdown_pct": drawdown_pct,
+                "start_time": rows[0][0] if rows else 0,
+                "end_time": rows[-1][0] if rows else 0,
+                "point_count": len(rows),
+            },
+            "generated_at": int(time.time() * 1000),
         }
     def whale_zones(self, proc_name, coin, merge=1.0, fill_window_min=1440, include_orders=True, include_fills=True, include_positions=False, kind="all"):
         """聚合 autohunt 收集账户在该币种上的普通挂单区间。"""
@@ -1818,8 +2335,19 @@ class WebRequestHandler(BaseHTTPRequestHandler):
                         (query.get("force") or ["0"])[0] == "1",
                     ),
                 )
+            elif path == "/api/autohunt/pnl":
+                self._send_json(200, self.app.autohunt_pnl_data((query.get("address") or [""])[0]))
+            elif path == "/api/autohunt/search":
+                self._send_json(200, {"results": self.app.autohunt_leaderboard_search((query.get("q") or [""])[0], (query.get("limit") or ["30"])[0])})
+            elif path == "/api/autohunt/hunt":
+                self._send_json(200, self.app.autohunt_hunt_status((query.get("job_id") or [""])[0]))
+            elif path == "/api/account/detail":
+                self._send_json(200, self.app.account_detail_data(address, (query.get("window") or ["24h"])[0]))
+            elif path == "/api/autohunt/positions":
+                self._send_json(200, self.app.autohunt_positions_data())
             elif path == "/api/autohunt":
-                self._send_json(200, self.app.autohunt_data())
+                include_positions = (query.get("positions") or ["1"])[0] != "0"
+                self._send_json(200, self.app.autohunt_data(include_positions))
             elif path == "/api/events":
                 limit = min(200, max(1, int((query.get("limit") or [100])[0])))
                 self._send_json(200, self.app.recent_events(address, limit))
@@ -1837,6 +2365,13 @@ class WebRequestHandler(BaseHTTPRequestHandler):
             if path == "/api/accounts":
                 item = self.app.add_account(data.get("address", ""), data.get("alias", ""))
                 self._send_json(200, {"account": item})
+            elif path == "/api/autohunt/hunt":
+                job = self.app.start_autohunt_hunt(
+                    data.get("limit", 0),
+                    data.get("coins"),
+                    data.get("swing", False),
+                )
+                self._send_json(200, job)
             elif path == "/api/settings":
                 if data.get("reset"):
                     self._send_json(200, self.app.reset_settings())

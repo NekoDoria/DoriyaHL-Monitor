@@ -235,6 +235,19 @@
         <section class="panel" data-panel="autohunt">
           <div class="panel-head">
             <div><h1>Autohunt</h1><div class="panel-meta">自动收集进程与已收录账户</div></div>
+            <div class="chart-controls autohunt-controls">
+              <input id="autohunt-search" class="autohunt-search" type="search" placeholder="搜索排行榜地址/别名，本地收录同步过滤" autocomplete="off" spellcheck="false" aria-label="搜索 Autohunt">
+              <select id="autohunt-limit" class="chart-select" aria-label="Hunt 数量">
+                <option value="0">默认</option>
+                <option value="5">5 个</option>
+                <option value="10">10 个</option>
+                <option value="20">20 个</option>
+              </select>
+              <button id="autohunt-hunt" class="chart-tool" type="button" title="执行 Telegram /hunt；搜索框填 BTC, ETH 可指定标的，留空综合扫描">
+                <svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="M20 20l-3.6-3.6"/></svg>
+                <span>扫描</span>
+              </button>
+            </div>
           </div>
           <div class="panel-state"></div>
           <div class="panel-body"></div>
@@ -302,7 +315,31 @@
       </div>
     </main>
   </div>
+  <div id="account-detail" class="account-detail" hidden>
+    <div class="detail-dialog" role="dialog" aria-modal="true" aria-label="账户详情">
+      <div class="detail-topbar">
+        <div>
+          <div id="account-detail-title" class="detail-title">账户详情</div>
+          <code id="account-detail-address" class="detail-address"></code>
+        </div>
+        <div class="detail-topbar-actions">
+          <div id="account-detail-window" class="segmented detail-window">
+            <button type="button" data-window="24h">24h</button>
+            <button type="button" data-window="48h">48h</button>
+            <button type="button" data-window="7d">7d</button>
+            <button type="button" data-window="30d">30d</button>
+            <button type="button" data-window="all">All</button>
+          </div>
+          <button id="account-detail-close" class="icon-button" type="button" aria-label="关闭详情">
+            <svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18"/></svg>
+          </button>
+        </div>
+      </div>
+      <div id="account-detail-body" class="detail-body"></div>
+    </div>
+  </div>
   <script src="/vendor/lightweight-charts.standalone.production.js"></script>
+  <script src="/vendor/anime.min.js"></script>
   <script src="/app.js"></script>
 </body>
 </html>

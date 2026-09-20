@@ -12,6 +12,30 @@ const state = {
   whaleChain: localStorage.getItem("hl.whaleChain") || "",
   autohuntProc: localStorage.getItem("hl.autohuntProc") || "",
   autohuntProcesses: [],
+  autohuntQuery: localStorage.getItem("hl.autohuntQuery") || "",
+  autohuntSearchResults: [],
+  autohuntSearchStatus: "",
+  autohuntSearchToken: 0,
+  autohuntPositions: null,
+  autohuntPositionsStatus: "",
+  autohuntPositionsToken: 0,
+  accountDetail: null,
+  accountDetailToken: 0,
+  accountDetailTab: "positions",
+  accountDetailWindow: localStorage.getItem("hl.accountDetailWindow") || "24h",
+  accountDetailChart: null,
+  accountDetailResize: null,
+  autohuntHuntId: sessionStorage.getItem("hl.autohuntJob") || "",
+  autohuntHunt: null,
+  autohuntHuntToken: 0,
+  autohuntHuntTimer: null,
+  autohuntData: null,
+  autohuntPnl: null,
+  autohuntPnlToken: 0,
+  autohuntPnlAddress: localStorage.getItem("hl.autohuntPnl") || "",
+  autohuntPnlAlias: localStorage.getItem("hl.autohuntPnlAlias") || "",
+  autohuntPnlChart: null,
+  autohuntPnlResize: null,
   webChatId: "__web__",
   whaleData: null,
   whaleScan: null,
@@ -68,6 +92,15 @@ const els = {
   chartFullscreen: document.getElementById("chart-fullscreen"),
   chartSideToggle: document.getElementById("chart-side-toggle"),
   autohuntProcess: document.getElementById("autohunt-process"),
+  autohuntSearch: document.getElementById("autohunt-search"),
+  accountDetail: document.getElementById("account-detail"),
+  accountDetailTitle: document.getElementById("account-detail-title"),
+  accountDetailAddress: document.getElementById("account-detail-address"),
+  accountDetailBody: document.getElementById("account-detail-body"),
+  accountDetailWindow: document.getElementById("account-detail-window"),
+  accountDetailClose: document.getElementById("account-detail-close"),
+  autohuntHunt: document.getElementById("autohunt-hunt"),
+  autohuntLimit: document.getElementById("autohunt-limit"),
   chartOverlayStatus: document.getElementById("chart-overlay-status"),
   chartFillWindow: document.getElementById("chart-fill-window"),
   fillWindowValue: document.getElementById("fill-window-value"),
@@ -88,6 +121,8 @@ const els = {
   wtaRefresh: document.getElementById("wta-refresh"),
   brandText: document.getElementById("brand-text"),
 };
+
+els.autohuntSearch.value = state.autohuntQuery;
 
 function chartPanel() {
   return panel("chart");
@@ -1335,31 +1370,750 @@ function processStatusText(row) {
   return "已停止";
 }
 
+function destroyAutohuntPnlChart() {
+  if (state.autohuntPnlResize) {
+    state.autohuntPnlResize.disconnect();
+    state.autohuntPnlResize = null;
+  }
+  if (state.autohuntPnlChart) {
+    state.autohuntPnlChart.remove();
+    state.autohuntPnlChart = null;
+  }
+}
+
+function autohuntText(value) {
+  return String(value ?? "").trim().toLowerCase();
+}
+
+function filterAutohuntData(data, rawQuery) {
+  const term = autohuntText(rawQuery);
+  if (!term) return data;
+  const matches = (...values) => values.flat().some((value) => autohuntText(value).includes(term));
+
+  const processes = (data.processes || []).map((process) => {
+    if (matches(process.name, process.coins || [])) return process;
+    const accounts = (process.accounts || []).filter((account) => matches(
+      account.address, account.alias, account.account_value,
+    ));
+    const positions = (process.positions || []).filter((position) => matches(
+      position.coin, position.side, position.account, position.accounts || [],
+    ));
+    if (!accounts.length && !positions.length) return null;
+    return { ...process, accounts, positions };
+  }).filter(Boolean);
+
+  const collected = (data.collected || []).filter((account) => matches(
+    account.address, account.alias, account.account_value, account.volume,
+    account.pnl, account.roi, account.win_rate, account.score,
+  ));
+
+  return { ...data, processes, collected };
+}
+
+function autohuntPnlTrigger(address, alias = "") {
+  const button = make("button", "autohunt-pnl-trigger", "详情");
+  button.type = "button";
+  button.dataset.address = address;
+  button.dataset.alias = alias || "";
+  button.title = "查看账户详情";
+  return button;
+}
+
+function bindAutohuntPnlTriggers(root) {
+  root.querySelectorAll(".autohunt-pnl-trigger").forEach((button) => {
+    button.addEventListener("click", () => showAccountDetail(button.dataset.address, button.dataset.alias));
+  });
+}
+
+function renderAutohuntPnlCard() {
+  const current = state.autohuntPnl;
+  if (!current) return null;
+  const card = make("div", "pnl-card");
+  const head = make("div", "pnl-head");
+  const title = make("div", "pnl-title");
+  title.append(make("div", "pnl-name", current.alias || shortAddress(current.address)));
+  title.append(make("code", "pnl-address", shortAddress(current.address)));
+  const close = make("button", "icon-button pnl-close");
+  close.type = "button";
+  close.setAttribute("aria-label", "关闭收益曲线");
+  close.append(make("span", "", "×"));
+  close.addEventListener("click", () => {
+    state.autohuntPnlAddress = "";
+    state.autohuntPnlAlias = "";
+    state.autohuntPnl = null;
+    localStorage.removeItem("hl.autohuntPnl");
+    localStorage.removeItem("hl.autohuntPnlAlias");
+    destroyAutohuntPnlChart();
+    renderAutohunt(state.autohuntData, panel("autohunt").querySelector(".panel-body"));
+  });
+  head.append(title, close);
+  card.append(head);
+
+  if (current.loading) {
+    const loading = make("div", "pnl-loading");
+    for (let index = 0; index < 3; index += 1) loading.append(make("i"));
+    loading.append(make("span", "", "正在读取累计盈亏..."));
+    card.append(loading);
+    return card;
+  }
+  if (current.error) {
+    card.append(make("div", "state-error", current.error));
+    return card;
+  }
+
+  const data = current.data || {};
+  const info = data.account || {};
+  const stats = data.metrics || {};
+  const metrics = make("div", "metrics pnl-metrics");
+  const currentPnl = Number(stats.current);
+  metrics.append(
+    metric("累计盈亏", Number.isFinite(currentPnl) ? signed(currentPnl) : "-", pnlClass(currentPnl)),
+    metric("账户净值", formatAmount(info.account_value)),
+    metric("全时段 ROI", `${(Number(info.roi) || 0).toFixed(2)}%`, pnlClass(info.roi)),
+    metric("加权胜率", `${((Number(info.weighted_win_rate) || 0) * 100).toFixed(1)}%`),
+    metric("最大回撤", stats.max_drawdown_pct == null ? "-" : `${Number(stats.max_drawdown_pct).toFixed(2)}%`),
+    metric("评分", info.score ? (Number(info.score) * 100).toFixed(0) + "/100" : "-"),
+  );
+  card.append(metrics);
+
+  const chartWrap = make("div", "pnl-chart");
+  chartWrap.dataset.address = current.address;
+  card.append(chartWrap);
+  const hint = make("div", "pnl-hint");
+  if (Number(stats.point_count) > 0) {
+    hint.append(
+      make("span", "", `${timeText(stats.start_time)} — ${timeText(stats.end_time)} · ${stats.point_count} 点`),
+      make("span", "", `区间变化 ${signed(stats.change)}`),
+    );
+  } else {
+    hint.append(make("span", "", "该账户暂时没有历史收益数据"));
+  }
+  card.append(hint);
+
+  if ((data.points || []).length) {
+    const token = current.token;
+    requestAnimationFrame(() => {
+      if (state.autohuntPnl?.token === token) mountAutohuntPnlChart(chartWrap, data);
+    });
+  }
+  return card;
+}
+
+function mountAutohuntPnlChart(container, data) {
+  if (!window.LightweightCharts) return;
+  destroyAutohuntPnlChart();
+
+  const points = (data.points || []).map((point) => {
+    let time = Number(point.time) || 0;
+    if (time > 1e12) time /= 1000;
+    return { time: Math.floor(time), value: Number(point.pnl) || 0 };
+  }).filter((point) => point.time > 0 && Number.isFinite(point.value));
+  points.sort((a, b) => a.time - b.time);
+
+  const chart = LightweightCharts.createChart(container, {
+    width: Math.max(320, container.clientWidth || 680),
+    height: 260,
+    layout: {
+      background: { type: "solid", color: "transparent" },
+      textColor: "#9b9b9b",
+      fontSize: 11,
+    },
+    grid: {
+      vertLines: { visible: false },
+      horzLines: { color: "rgba(255,255,255,.055)" },
+    },
+    rightPriceScale: { borderColor: "#303030" },
+    timeScale: {
+      borderColor: "#303030",
+      timeVisible: true,
+      secondsVisible: false,
+      rightOffset: 0,
+    },
+    localization: { priceFormatter: (value) => formatAmount(value) },
+    crosshair: { mode: LightweightCharts.CrosshairMode.Normal },
+  });
+  const series = chart.addSeries(LightweightCharts.BaselineSeries, {
+    baseValue: { type: "price", price: 0 },
+    lineWidth: 2,
+    topLineColor: "#66dd8e",
+    topFillColor1: "rgba(102,221,142,.32)",
+    topFillColor2: "rgba(102,221,142,.03)",
+    bottomLineColor: "#ff7a7a",
+    bottomFillColor1: "rgba(255,122,122,.03)",
+    bottomFillColor2: "rgba(255,122,122,.32)",
+    priceLineVisible: false,
+    lastValueVisible: true,
+  });
+  series.setData(points);
+  chart.timeScale().fitContent();
+
+  const resize = new ResizeObserver(() => {
+    chart.applyOptions({ width: Math.max(240, container.clientWidth), height: 260 });
+  });
+  resize.observe(container);
+  state.autohuntPnlChart = chart;
+  state.autohuntPnlResize = resize;
+}
+
+function destroyAccountDetailChart() {
+  if (state.accountDetailResize) {
+    state.accountDetailResize.disconnect();
+    state.accountDetailResize = null;
+  }
+  if (state.accountDetailChart) {
+    state.accountDetailChart.remove();
+    state.accountDetailChart = null;
+  }
+}
+
+function accountDonut(title, rows, valueFormatter = formatAmount, signColor = false) {
+  const card = make("div", "donut-card");
+  card.append(make("div", "donut-title", title));
+  const values = (rows || []).filter((row) => Number(row.value) !== 0).slice(0, 8);
+  const total = values.reduce((sum, row) => sum + Math.abs(Number(row.value) || 0), 0);
+  const center = make("div", "donut-visual");
+  const size = 150;
+  const radius = 52;
+  const circumference = 2 * Math.PI * radius;
+  const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+  svg.setAttribute("viewBox", `0 0 ${size} ${size}`);
+  svg.classList.add("donut-svg");
+
+  const colors = ["#38d1a7", "#6eaaff", "#ffbe69", "#c89bff", "#ff8a8a", "#4fd8e0", "#f7d774", "#a0e7a0"];
+  let offset = 0;
+  values.forEach((row, index) => {
+    const value = Math.abs(Number(row.value) || 0);
+    const fraction = total > 0 ? value / total : 0;
+    const circle = document.createElementNS("http://www.w3.org/2000/svg", "circle");
+    circle.setAttribute("cx", "75");
+    circle.setAttribute("cy", "75");
+    circle.setAttribute("r", String(radius));
+    circle.setAttribute("fill", "none");
+    circle.setAttribute("stroke", colors[index % colors.length]);
+    circle.setAttribute("stroke-width", "22");
+    const finalDash = `${Math.max(0, fraction * circumference - 2)} ${circumference}`;
+    circle.dataset.finalDash = finalDash;
+    circle.dataset.circumference = String(circumference);
+    circle.setAttribute("stroke-dasharray", finalDash);
+    circle.setAttribute("stroke-dashoffset", String(-offset * circumference));
+    circle.setAttribute("transform", "rotate(-90 75 75)");
+    circle.setAttribute("stroke-linecap", "butt");
+    svg.append(circle);
+    offset += fraction;
+  });
+  const centerText = document.createElementNS("http://www.w3.org/2000/svg", "text");
+  centerText.setAttribute("x", "75");
+  centerText.setAttribute("y", "72");
+  centerText.setAttribute("text-anchor", "middle");
+  centerText.classList.add("donut-total");
+  centerText.textContent = total ? valueFormatter(signColor ? values.reduce((sum, row) => sum + Number(row.value || 0), 0) : total) : "-";
+  const centerLabel = document.createElementNS("http://www.w3.org/2000/svg", "text");
+  centerLabel.setAttribute("x", "75");
+  centerLabel.setAttribute("y", "90");
+  centerLabel.setAttribute("text-anchor", "middle");
+  centerLabel.classList.add("donut-label");
+  centerLabel.textContent = values.length ? "合计" : "暂无";
+  svg.append(centerText, centerLabel);
+  center.append(svg);
+
+  const legend = make("div", "donut-legend");
+  if (!values.length) {
+    legend.append(make("div", "donut-empty", "该区间没有数据"));
+  }
+  values.forEach((row, index) => {
+    const item = make("div", "donut-item");
+    const dot = make("i", "donut-dot");
+    dot.style.background = colors[index % colors.length];
+    item.append(dot, make("span", "donut-name", row.name || "-"), make("span", "donut-value", valueFormatter(Number(row.value) || 0)));
+    if (signColor) item.querySelector(".donut-value").classList.add(pnlClass(Number(row.value) || 0));
+    legend.append(item);
+  });
+  card.append(center, legend);
+  return card;
+}
+
+function mountAccountDetailChart(container, data) {
+  if (!window.LightweightCharts) return;
+  destroyAccountDetailChart();
+  const points = (data.pnl_series || []).map((point) => ({
+    time: Math.floor((Number(point.time) || 0) / 1000),
+    value: Number(point.pnl) || 0,
+  })).filter((point) => point.time > 0).sort((a, b) => a.time - b.time);
+
+  if (!points.length) {
+    container.append(make("div", "detail-chart-empty", "当前区间没有收益曲线数据"));
+    return;
+  }
+  const chart = LightweightCharts.createChart(container, {
+    width: Math.max(320, container.clientWidth || 900),
+    height: 230,
+    layout: { background: { type: "solid", color: "transparent" }, textColor: "#9b9b9b", fontSize: 11 },
+    grid: { vertLines: { visible: false }, horzLines: { color: "rgba(255,255,255,.055)" } },
+    rightPriceScale: { borderColor: "#303030" },
+    timeScale: { borderColor: "#303030", timeVisible: true, secondsVisible: false, rightOffset: 0 },
+    localization: { priceFormatter: (value) => formatAmount(value) },
+    crosshair: { mode: LightweightCharts.CrosshairMode.Normal },
+  });
+  const series = chart.addSeries(LightweightCharts.BaselineSeries, {
+    baseValue: { type: "price", price: 0 },
+    lineWidth: 2,
+    topLineColor: "#66dd8e",
+    topFillColor1: "rgba(102,221,142,.30)",
+    topFillColor2: "rgba(102,221,142,.02)",
+    bottomLineColor: "#ff7a7a",
+    bottomFillColor1: "rgba(255,122,122,.02)",
+    bottomFillColor2: "rgba(255,122,122,.30)",
+    priceLineVisible: false,
+    lastValueVisible: true,
+  });
+  series.setData(points);
+  chart.timeScale().fitContent();
+  const resize = new ResizeObserver(() => {
+    chart.applyOptions({ width: Math.max(240, container.clientWidth), height: 230 });
+  });
+  resize.observe(container);
+  state.accountDetailChart = chart;
+  state.accountDetailResize = resize;
+}
+
+const prefersReducedMotion = window.matchMedia?.("(prefers-reduced-motion: reduce)").matches;
+
+function motionReady() {
+  return Boolean(window.anime) && !prefersReducedMotion;
+}
+
+function animateMetricNumbers(container) {
+  if (!motionReady()) return;
+  container.querySelectorAll("[data-raw-value]").forEach((node, index) => {
+    const target = Number(node.dataset.rawValue);
+    const formatter = String(node.dataset.formatter || "formatAmount");
+    if (!Number.isFinite(target)) return;
+    anime({
+      targets: { value: 0 },
+      value: target,
+      duration: 620,
+      delay: 70 + index * 35,
+      easing: "easeOutExpo",
+      round: Math.abs(target) >= 1 ? 0 : 6,
+      update(anim) {
+        const value = anim.animatables[0].target.value;
+        node.textContent = formatter === "signed" ? signed(value) : formatAmount(value);
+      },
+    });
+  });
+}
+
+function animateDonutArcs(pies) {
+  if (!motionReady()) return;
+  pies.querySelectorAll(".donut-svg circle").forEach((circle, index) => {
+    const finalValue = circle.dataset.finalDash;
+    if (!finalValue) return;
+    anime({
+      targets: circle,
+      strokeDasharray: [`0 ${circle.dataset.circumference}`, finalValue],
+      duration: 760,
+      delay: 140 + index * 35,
+      easing: "easeOutCubic",
+    });
+  });
+}
+
+function accountMetric(label, value, className = "", rawValue = null, formatter = "formatAmount") {
+  const item = metric(label, value, className);
+  if (rawValue !== null && Number.isFinite(Number(rawValue))) {
+    item.dataset.rawValue = String(Number(rawValue));
+    item.dataset.formatter = formatter;
+  }
+  return item;
+}
+
+function accountDetailSection(title, headers, rows, emptyText) {
+  const wrap = make("div", "detail-section");
+  wrap.append(sectionTitle(title));
+  if (!rows.length) {
+    wrap.append(make("div", "state-empty", emptyText));
+    return wrap;
+  }
+  wrap.append(table(headers, rows));
+  return wrap;
+}
+
+function renderAccountDetail(data, animateContent = false) {
+  const info = data.account || {};
+  const stats = data.summary || {};
+  const title = info.alias || shortAddress(data.address);
+  els.accountDetailTitle.textContent = title;
+  els.accountDetailAddress.textContent = data.address;
+  els.accountDetailAddress.title = data.address;
+  for (const button of els.accountDetailWindow.querySelectorAll("button")) {
+    button.classList.toggle("active", button.dataset.window === data.window);
+  }
+
+  const root = els.accountDetailBody;
+  root.replaceChildren();
+  const metrics = make("div", "metrics account-metrics");
+  metrics.append(
+    accountMetric("账户净值", formatAmount(stats.account_value), "", Number(stats.account_value) || 0),
+    accountMetric("总盈亏", signed(stats.total_pnl), pnlClass(stats.total_pnl), Number(stats.total_pnl) || 0, "signed"),
+    accountMetric("24h 盈亏", signed(stats.pnl_24h), pnlClass(stats.pnl_24h), Number(stats.pnl_24h) || 0, "signed"),
+    accountMetric("48h 盈亏", signed(stats.pnl_48h), pnlClass(stats.pnl_48h), Number(stats.pnl_48h) || 0, "signed"),
+    accountMetric("7d 盈亏", signed(stats.pnl_7d), pnlClass(stats.pnl_7d), Number(stats.pnl_7d) || 0, "signed"),
+    accountMetric("30d 盈亏", signed(stats.pnl_30d), pnlClass(stats.pnl_30d), Number(stats.pnl_30d) || 0, "signed"),
+    accountMetric("区间成交", formatAmount(stats.period_volume), "", Number(stats.period_volume) || 0),
+    accountMetric("区间已实现", signed(stats.period_pnl), pnlClass(stats.period_pnl), Number(stats.period_pnl) || 0, "signed"),
+    accountMetric("胜率", `${((Number(stats.win_rate) || 0) * 100).toFixed(1)}%`),
+    accountMetric("最大回撤", stats.max_drawdown_pct == null ? "-" : `${Number(stats.max_drawdown_pct).toFixed(2)}%`),
+  );
+  root.append(metrics);
+
+  const chart = make("div", "detail-chart");
+  root.append(chart);
+  const pies = make("div", "detail-pies");
+  pies.append(
+    accountDonut("仓位分布", data.pies?.positions || [], formatAmount),
+    accountDonut("成交分布", data.pies?.volume || [], formatAmount),
+    accountDonut("盈亏分布", data.pies?.pnl || [], signed, true),
+  );
+  root.append(pies);
+
+  const tabs = make("div", "segmented detail-tabs");
+  const tabLabels = [
+    ["positions", `仓位 ${data.positions.length}`],
+    ["trades", `交易 ${data.fills.length}`],
+    ["orders", `当前委托 ${data.orders.length}`],
+    ["transfers", `充值&提现 ${data.transfers.length}`],
+    ["spot", `现货持仓 ${data.spot.length}`],
+  ];
+  for (const [key, label] of tabLabels) {
+    const button = make("button", "", label);
+    button.type = "button";
+    button.dataset.tab = key;
+    button.classList.toggle("active", state.accountDetailTab === key);
+    button.addEventListener("click", () => {
+      state.accountDetailTab = key;
+      renderAccountDetail(data);
+    });
+    tabs.append(button);
+  }
+  root.append(tabs);
+
+  const panelBody = make("div", "detail-tab-panel");
+  if (state.accountDetailTab === "positions") {
+    panelBody.append(accountDetailSection(
+      "合约仓位", ["币种", "方向", "数量", "开仓均价", "仓位价值", "未实现盈亏", "ROE", "杠杆", "保证金", "强平价"],
+      data.positions.map((row) => [
+        cell(row.coin), cell(row.side), cell(qty.format(row.size)), cell(priceText(row.entry)),
+        cell(formatAmount(row.notional)), cell(signed(row.pnl), pnlClass(row.pnl)),
+        cell(`${(Number(row.roe_pct) || 0).toFixed(2)}%`, pnlClass(row.roe_pct)),
+        cell(`${Number(row.leverage || 0).toFixed(0)}x`), cell(formatAmount(row.margin)), cell(priceText(row.liquidation)),
+      ]),
+      "当前没有合约仓位。",
+    ));
+  } else if (state.accountDetailTab === "trades") {
+    panelBody.append(accountDetailSection(
+      "成交记录", ["时间", "币种", "方向", "价格", "数量", "成交额", "已实现盈亏", "手续费"],
+      data.fills.map((row) => [
+        cell(timeText(row.time)), cell(row.coin), cell(sideText(row)), cell(priceText(row.px)),
+        cell(qty.format(Math.abs(Number(row.sz) || 0))), cell(formatAmount(Math.abs(Number(row.px) * Number(row.sz) || 0))),
+        cell(signed(row.closedPnl), pnlClass(row.closedPnl)), cell(formatAmount(row.fee)),
+      ]),
+      "该区间没有成交记录。",
+    ));
+  } else if (state.accountDetailTab === "orders") {
+    panelBody.append(accountDetailSection(
+      "当前委托", ["时间", "币种", "方向", "价格", "数量", "委托金额", "只减仓", "订单 ID"],
+      data.orders.map((row) => [
+        cell(timeText(row.time)), cell(row.coin), cell(row.side), cell(priceText(row.price)),
+        cell(qty.format(row.size)), cell(formatAmount(row.notional)), cell(row.reduce_only ? "是" : "否"), cell(String(row.oid || "-")),
+      ]),
+      "当前没有普通委托。",
+    ));
+  } else if (state.accountDetailTab === "transfers") {
+    panelBody.append(accountDetailSection(
+      "充值 & 提现", ["时间", "类型", "代币", "金额", "手续费", "对手地址"],
+      data.transfers.map((row) => [
+        cell(timeText(row.time)), cell(row.direction), cell(row.token), cell(formatAmount(row.amount)),
+        cell(formatAmount(row.fee)), addressCell(row.counterparty),
+      ]),
+      "没有充值或提现记录。",
+    ));
+  } else {
+    panelBody.append(accountDetailSection(
+      "现货持仓", ["代币", "总数量", "可用", "冻结", "建仓价值"],
+      data.spot.map((row) => [
+        cell(row.coin), cell(qty.format(row.total)), cell(qty.format(row.available)),
+        cell(qty.format(row.hold)), cell(formatAmount(row.entry_value)),
+      ]),
+      "当前没有现货余额。",
+    ));
+  }
+  root.append(panelBody);
+  if (animateContent) {
+    if (motionReady()) {
+      anime.set([metrics, chart, pies, tabs], { opacity: 0, translateY: 12 });
+      anime({
+        targets: [metrics, chart, pies, tabs],
+        opacity: [0, 1],
+        translateY: [12, 0],
+        delay: anime.stagger(55),
+        duration: 460,
+        easing: "easeOutCubic",
+      });
+    }
+    animateMetricNumbers(metrics);
+    animateDonutArcs(pies);
+  }
+  requestAnimationFrame(() => mountAccountDetailChart(chart, data));
+}
+
+async function requestAccountDetail(address, alias = "") {
+  const token = ++state.accountDetailToken;
+  const windowValue = state.accountDetailWindow;
+  state.accountDetail = { loading: true, address, alias, window: windowValue, error: "" };
+  els.accountDetailTitle.textContent = alias || shortAddress(address);
+  els.accountDetailAddress.textContent = address;
+  els.accountDetailBody.replaceChildren();
+  const loading = make("div", "detail-loading");
+  for (let index = 0; index < 3; index += 1) loading.append(make("i"));
+  loading.append(make("span", "", "正在读取账户详情..."));
+  els.accountDetailBody.append(loading);
+  destroyAccountDetailChart();
+  try {
+    const data = await request(`/api/account/detail?address=${encodeURIComponent(address)}&window=${encodeURIComponent(windowValue)}`);
+    if (token !== state.accountDetailToken) return;
+    state.accountDetail = { loading: false, address, alias, window: windowValue, error: "", data };
+    renderAccountDetail(data, true);
+  } catch (error) {
+    if (token !== state.accountDetailToken) return;
+    state.accountDetail = { loading: false, address, alias, window: windowValue, error: apiErrorText(error) };
+    els.accountDetailBody.replaceChildren(make("div", "state-error", apiErrorText(error)));
+  }
+}
+
+function showAccountDetail(address, alias = "") {
+  state.accountDetailWindow = localStorage.getItem("hl.accountDetailWindow") || "24h";
+  els.accountDetail.hidden = false;
+  if (motionReady()) {
+    anime.set(els.accountDetail, { opacity: 0 });
+    anime.set(els.accountDetail.querySelector(".detail-dialog"), { opacity: 0, translateY: 18, scale: 0.985 });
+    anime({ targets: els.accountDetail, opacity: [0, 1], duration: 170, easing: "linear" });
+    anime({
+      targets: els.accountDetail.querySelector(".detail-dialog"),
+      opacity: [0, 1],
+      translateY: [18, 0],
+      scale: [0.985, 1],
+      duration: 320,
+      easing: "easeOutCubic",
+    });
+  }
+  state.accountDetailTab = "positions";
+  requestAccountDetail(address, alias);
+}
+
+function closeAccountDetail() {
+  if (els.accountDetail.hidden) return;
+  state.accountDetailToken += 1;
+  const finish = () => {
+    els.accountDetail.hidden = true;
+    destroyAccountDetailChart();
+  };
+  if (!motionReady()) {
+    finish();
+    return;
+  }
+  anime({
+    targets: els.accountDetail,
+    opacity: [1, 0],
+    duration: 150,
+    easing: "linear",
+    complete: finish,
+  });
+  anime({
+    targets: els.accountDetail.querySelector(".detail-dialog"),
+    opacity: [1, 0],
+    translateY: [0, 12],
+    scale: [1, 0.99],
+    duration: 170,
+    easing: "easeInCubic",
+  });
+}
+
+async function loadAutohuntPnl(address, alias = "") {
+  const normalized = String(address || "").trim().toLowerCase();
+  if (!normalized) return;
+  const token = ++state.autohuntPnlToken;
+  state.autohuntPnlAddress = normalized;
+  state.autohuntPnlAlias = alias || state.autohuntPnlAlias || "";
+  localStorage.setItem("hl.autohuntPnl", normalized);
+  localStorage.setItem("hl.autohuntPnlAlias", state.autohuntPnlAlias);
+  state.autohuntPnl = { token, loading: true, address: normalized, alias: state.autohuntPnlAlias, error: "", data: null };
+
+  const body = panel("autohunt").querySelector(".panel-body");
+  if (state.autohuntData) renderAutohunt(state.autohuntData, body);
+  try {
+    const data = await request(`/api/autohunt/pnl?address=${encodeURIComponent(normalized)}`);
+    if (token !== state.autohuntPnlToken || state.view !== "autohunt") return;
+    state.autohuntPnl = { token, loading: false, address: normalized, alias: state.autohuntPnlAlias, error: "", data };
+    renderAutohunt(state.autohuntData || { processes: [], collected: [] }, body);
+  } catch (error) {
+    if (token !== state.autohuntPnlToken || state.view !== "autohunt") return;
+    state.autohuntPnl = { token, loading: false, address: normalized, alias: state.autohuntPnlAlias, error: apiErrorText(error), data: null };
+    renderAutohunt(state.autohuntData || { processes: [], collected: [] }, body);
+  }
+}
+
+function huntScopeText(job) {
+  const coins = job.coins || [];
+  return coins.length ? coins.join(" / ") : "综合扫描";
+}
+
+function renderAutohuntHuntCard() {
+  const job = state.autohuntHunt;
+  if (!job || job.status === "not_found") return null;
+  const card = make("div", "hunt-card");
+  const head = make("div", "hunt-head");
+  head.append(
+    make("div", "hunt-title", "Hunt 扫描"),
+    make("span", "hunt-scope", huntScopeText(job)),
+    make("span", `hunt-status ${job.status}`, job.status === "success" ? "完成" : job.status === "error" ? "失败" : "扫描中"),
+  );
+  card.append(head);
+
+  if (job.status === "running") {
+    const total = Math.max(Number(job.progress_total) || 0, 1);
+    const done = Math.min(Math.max(Number(job.progress_done) || 0, 0), total);
+    const pct = Math.round((done / total) * 100);
+    const bar = make("div", "progress");
+    const fill = make("div", "progress-fill");
+    fill.style.width = `${pct}%`;
+    bar.append(fill);
+    card.append(bar, make("div", "progress-text", `正在精算胜率 ${done}/${total}（${pct}%）`));
+    return card;
+  }
+  if (job.status === "error") {
+    card.append(make("div", "state-error", job.error || "Hunt 扫描失败"));
+    return card;
+  }
+
+  const results = job.results || [];
+  card.append(make("div", "hunt-meta", `发现 ${results.length} 个账户 · 粗筛 ${job.scanned_count || 0} 个 · 已同步到收集库`));
+  if (!results.length) {
+    card.append(make("div", "state-empty", "本轮没有符合条件的账户。"));
+    return card;
+  }
+  const rows = results.map((account) => {
+    const action = cell("", "table-action");
+    action.append(autohuntPnlTrigger(account.address, account.alias));
+    return [
+      cell(account.alias || "-"),
+      addressCell(account.address),
+      cell(formatAmount(account.account_value)),
+      cell(formatAmount(account.volume)),
+      cell(signed(account.pnl), pnlClass(account.pnl)),
+      cell(`${(Number(account.roi) || 0).toFixed(2)}%`, pnlClass(account.roi)),
+      cell(`${((Number(account.win_rate) || 0) * 100).toFixed(1)}%`),
+      cell(`${((Number(account.weighted_win_rate) || 0) * 100).toFixed(1)}%`),
+      cell(String(account.sample_size || 0)),
+      cell((Number(account.score) || 0).toFixed(2)),
+      action,
+    ];
+  });
+  card.append(table(["别名", "地址", "净值", "成交", "盈亏", "ROI", "胜率", "加权", "样本", "评分", "走势"], rows));
+  return card;
+}
+
+function renderAutohuntLeaderboard() {
+  if (!state.autohuntQuery || state.autohuntSearchStatus === "loading") {
+    if (state.autohuntSearchStatus === "loading") {
+      const loading = make("div", "hunt-search-state", "排行榜匹配中...");
+      return loading;
+    }
+    return null;
+  }
+  const rows = state.autohuntSearchResults || [];
+  if (!rows.length) return null;
+  const card = make("div", "hunt-card leaderboard-card");
+  const head = make("div", "hunt-head");
+  head.append(make("div", "hunt-title", "排行榜匹配"), make("span", "hunt-scope", `${rows.length} 个`));
+  card.append(head);
+  const tableRows = rows.map((account) => {
+    const action = cell("", "table-action");
+    action.append(autohuntPnlTrigger(account.address, account.alias));
+    return [
+      cell(account.alias || "-"),
+      addressCell(account.address),
+      cell(formatAmount(account.account_value)),
+      cell(formatAmount(account.volume)),
+      cell(signed(account.pnl), pnlClass(account.pnl)),
+      cell(`${(Number(account.roi) || 0).toFixed(2)}%`, pnlClass(account.roi)),
+      action,
+    ];
+  });
+  card.append(table(["别名", "地址", "净值", "成交", "盈亏", "ROI", "走势"], tableRows));
+  return card;
+}
+
+function parseAutohuntCoins(query) {
+  const values = String(query || "").trim().split(/[,，\s]+/).filter(Boolean);
+  if (!values.length) return [];
+  const coinLike = values.every((value) => /^[A-Za-z][A-Za-z0-9:-]{0,24}$/.test(value));
+  return coinLike ? values.map((value) => value.toUpperCase()) : [];
+}
+
 function renderAutohunt(data, body) {
+  state.autohuntData = data;
+  destroyAutohuntPnlChart();
+  const query = state.autohuntQuery;
+  const pendingPositions = state.autohuntPositions === null;
+  const positionedData = {
+    ...data,
+    processes: (data.processes || []).map((process) => {
+      const positions = pendingPositions ? [] : state.autohuntPositions[process.key] || [];
+      return { ...process, positions, position_count: pendingPositions ? null : positions.length };
+    }),
+  };
+  const view = filterAutohuntData(positionedData, query);
+  body.replaceChildren();
+
+  const pnlCard = renderAutohuntPnlCard();
+  if (pnlCard) body.append(pnlCard);
+
   if (!data.processes.length) {
     body.append(make("div", "state-empty", "还没有自动收集进程。可在 Telegram 用 /autohunt new 名称 创建。"));
   }
 
-  for (const row of data.processes) {
+  const huntCard = renderAutohuntHuntCard();
+  if (huntCard) body.append(huntCard);
+
+  if (query) {
+    const bar = make("div", "autohunt-toolbar");
+    bar.append(make("span", "", `本地匹配 ${view.processes.length} 个进程 / ${view.collected.length} 个大户${state.autohuntSearchResults.length ? ` · 排行榜 ${state.autohuntSearchResults.length} 个` : ""}`));
+    body.append(bar);
+  }
+
+  const leaderboardCard = renderAutohuntLeaderboard();
+  if (leaderboardCard) body.append(leaderboardCard);
+
+  for (const row of view.processes) {
     const card = make("div", "process-card");
     const head = make("div", "process-head");
     const title = make("div", "process-title");
     title.append(make("span", "process-name", row.name));
     title.append(make("span", `process-status ${row.running ? "running" : row.enabled ? "on" : "off"}`, processStatusText(row)));
     head.append(title);
-    head.append(make("div", "process-scope", row.coins.length ? row.coins.join("、") : "综合"));
+    head.append(make("div", "process-scope", row.coins.length ? row.coins.join("、") : "聚合"));
     card.append(head);
 
     const meta = make("div", "process-meta");
     meta.append(
-      make("span", "", `每轮 ${row.limit}`),
+      make("span", "", `每次 ${row.limit}`),
       make("span", "", `间隔 ${Number(row.interval_h).toFixed(1).replace(/\.0$/, "")}h`),
-      make("span", "", `已收集 ${row.account_count}`),
-      make("span", "", `持仓 ${row.position_count || 0}`),
+      make("span", "", "已收集 " + row.account_count),
+      make("span", "", pendingPositions ? "持仓 加载中" : row.position_count === null ? "持仓 -" : `持仓 ${row.position_count || 0}`),
       make("span", "", `上次 ${relativeTime(row.last_run)}`),
     );
     if (row.enabled && !row.running && row.next_run) {
-      meta.append(make("span", "", `下轮 ${relativeTime(row.next_run)}`));
+      meta.append(make("span", "", `下次 ${relativeTime(row.next_run)}`));
     }
     card.append(meta);
 
@@ -1371,55 +2125,189 @@ function renderAutohunt(data, body) {
       const fill = make("div", "progress-fill");
       fill.style.width = `${pct}%`;
       bar.append(fill);
-      card.append(bar, make("div", "progress-text", `已精算 ${done}/${total}（${pct}%）`));
+      card.append(bar, make("div", "progress-text", `已扫描 ${done}/${total}（${pct}%）`));
     }
 
     const positions = row.positions || [];
-    card.append(make("div", "process-section-title", positions.length ? "聚合持仓（同方向、均价相近）" : "聚合持仓（当前无持仓）"));
+    const positionTitle = pendingPositions ? "聚合持仓（加载中）" : positions.length ? "聚合持仓（同向、相近价格）" : "聚合持仓（当前无持仓）";
+    card.append(make("div", "process-section-title", positionTitle));
     if (positions.length) {
       const positionRows = positions.map((position) => [
         cell(position.coin),
-        cell(position.side || "—"),
+        cell(position.side || "-"),
         cell(qty.format(Math.abs(Number(position.szi) || 0))),
         cell(priceText(position.entry)),
         cell(formatAmount(position.notional)),
         cell(signed(position.pnl), pnlClass(position.pnl)),
-        cell(position.account_count ? String(position.account_count) : "—"),
+        cell(position.account_count ? String(position.account_count) : "-"),
       ]);
-      card.append(table(["币种", "方向", "数量", "加权均价", "持仓价值", "浮动盈亏", "账户数"], positionRows));
+      card.append(table(["币种", "方向", "数量", "加权均价", "仓位价值", "浮动盈亏", "账户数"], positionRows));
     } else {
-      card.append(make("div", "process-empty", "本轮收录账户暂无未平仓头寸"));
+      card.append(make("div", "process-empty", pendingPositions ? "正在读取这些账户的当前持仓..." : state.autohuntPositionsStatus === "error" ? "持仓读取失败，但账户列表已正常显示。" : "这些记录账户当前未平仓头寸。"));
     }
+
     if (row.accounts.length) {
-      const rows = row.accounts.map((acc) => [
-        cell(acc.alias || "—"),
-        cell(shortAddress(acc.address)),
-        cell(formatAmount(acc.account_value)),
-        cell(relativeTime(acc.scanned_at)),
-      ]);
-      card.append(table(["命名", "地址", "账户价值", "收录时间"], rows));
+      const rows = row.accounts.map((account) => {
+        const action = cell("", "table-action");
+        action.append(autohuntPnlTrigger(account.address, account.alias));
+        return [
+          cell(account.alias || "-"),
+          addressCell(account.address),
+          cell(formatAmount(account.account_value)),
+          cell(relativeTime(account.scanned_at)),
+          action,
+        ];
+      });
+      card.append(table(["别名", "地址", "账户价值", "记录时间", "走势"], rows));
     } else {
-      card.append(make("div", "process-empty", "该进程还没有收录账户"));
+      card.append(make("div", "process-empty", "该进程没有已收集账户"));
     }
     body.append(card);
   }
 
-  if (data.collected.length) {
-    body.append(sectionTitle(`已收录大户（${data.collected.length}）`));
-    const rows = data.collected.slice(0, 100).map((row) => [
-      cell(row.alias || "—"),
-      cell(shortAddress(row.address)),
-      cell(formatAmount(row.account_value)),
-      cell(formatAmount(row.volume)),
-      cell(signed(row.pnl), pnlClass(row.pnl)),
-      cell(`${(Number(row.roi) || 0).toFixed(1)}%`, pnlClass(row.roi)),
-      cell(`${((Number(row.win_rate) || 0) * 100).toFixed(1)}%`),
-      cell((Number(row.score) || 0).toFixed(2)),
-    ]);
-    body.append(table(["命名", "地址", "账户价值", "成交量", "盈亏", "ROI", "胜率", "评分"], rows));
+  if (view.collected.length) {
+    body.append(sectionTitle(`已收集大户（${view.collected.length}）`));
+    const rows = view.collected.map((account) => {
+      const action = cell("", "table-action");
+      action.append(autohuntPnlTrigger(account.address, account.alias));
+      return [
+        cell(account.alias || "-"),
+        addressCell(account.address),
+        cell(formatAmount(account.account_value)),
+        cell(formatAmount(account.volume)),
+        cell(signed(account.pnl), pnlClass(account.pnl)),
+        cell(`${(Number(account.roi) || 0).toFixed(1)}%`, pnlClass(account.roi)),
+        cell(`${((Number(account.win_rate) || 0) * 100).toFixed(1)}%`),
+        cell((Number(account.score) || 0).toFixed(2)),
+        action,
+      ];
+    });
+    body.append(table(["别名", "地址", "账户价值", "成交量", "盈利", "ROI", "胜率", "评分", "走势"], rows));
+  } else if (query) {
+    const empty = make("div", "state-empty");
+    empty.append(make("span", "", "没有匹配的收集大户。当前搜索词可能仍在过滤本地列表。 "));
+    const clear = make("button", "row-button", "清空搜索");
+    clear.type = "button";
+    clear.addEventListener("click", () => {
+      state.autohuntQuery = "";
+      els.autohuntSearch.value = "";
+      localStorage.removeItem("hl.autohuntQuery");
+      state.autohuntSearchResults = [];
+      state.autohuntSearchStatus = "";
+      renderAutohunt(state.autohuntData || { processes: [], collected: [] }, panel("autohunt").querySelector(".panel-body"));
+    });
+    empty.append(clear);
+    body.append(empty);
+  }
+
+  bindAutohuntPnlTriggers(body);
+
+  if (state.autohuntPnlAddress && !state.autohuntPnl) {
+    const known = (data.collected || []).find((account) => account.address === state.autohuntPnlAddress)
+      || (data.processes || []).flatMap((process) => process.accounts || []).find((account) => account.address === state.autohuntPnlAddress);
+    setTimeout(() => loadAutohuntPnl(state.autohuntPnlAddress, known?.alias || state.autohuntPnlAlias), 0);
+  }
+  if (state.autohuntHuntId && !state.autohuntHunt) {
+    setTimeout(() => pollAutohuntHunt(state.autohuntHuntId), 0);
+  }
+  if ((data.processes || []).length && state.autohuntPositions === null) {
+    setTimeout(() => loadAutohuntPositions(), 0);
   }
 }
-// ---------------------------------------------------------------- 链上筹码
+
+async function loadAutohuntPositions() {
+  const token = ++state.autohuntPositionsToken;
+  try {
+    const data = await request("/api/autohunt/positions");
+    if (token !== state.autohuntPositionsToken || state.view !== "autohunt") return;
+    state.autohuntPositions = data.positions || {};
+    state.autohuntPositionsStatus = "ready";
+    if (state.autohuntData) renderAutohunt(state.autohuntData, panel("autohunt").querySelector(".panel-body"));
+  } catch (error) {
+    if (token !== state.autohuntPositionsToken || state.view !== "autohunt") return;
+    state.autohuntPositions = {};
+    state.autohuntPositionsStatus = "error";
+    if (state.autohuntData) renderAutohunt(state.autohuntData, panel("autohunt").querySelector(".panel-body"));
+  }
+}
+
+async function loadAutohuntSearch() {
+  const query = state.autohuntQuery.trim();
+  const token = ++state.autohuntSearchToken;
+  if (query.length < 2) {
+    state.autohuntSearchResults = [];
+    state.autohuntSearchStatus = "";
+    renderAutohunt(state.autohuntData || { processes: [], collected: [] }, panel("autohunt").querySelector(".panel-body"));
+    return;
+  }
+  state.autohuntSearchStatus = "loading";
+  renderAutohunt(state.autohuntData || { processes: [], collected: [] }, panel("autohunt").querySelector(".panel-body"));
+  try {
+    const data = await request(`/api/autohunt/search?limit=30&q=${encodeURIComponent(query)}`);
+    if (token !== state.autohuntSearchToken) return;
+    state.autohuntSearchResults = data.results || [];
+    state.autohuntSearchStatus = "ready";
+    renderAutohunt(state.autohuntData || { processes: [], collected: [] }, panel("autohunt").querySelector(".panel-body"));
+  } catch (error) {
+    if (token !== state.autohuntSearchToken) return;
+    state.autohuntSearchResults = [];
+    state.autohuntSearchStatus = "error";
+    renderAutohunt(state.autohuntData || { processes: [], collected: [] }, panel("autohunt").querySelector(".panel-body"));
+  }
+}
+
+async function runAutohuntHunt() {
+  const coins = parseAutohuntCoins(state.autohuntQuery);
+  const limit = Number(els.autohuntLimit.value || 0) || 0;
+  const token = ++state.autohuntHuntToken;
+  state.autohuntHunt = {
+    status: "running", coins, limit,
+    progress_done: 0, progress_total: 0, results: [], scanned_count: 0,
+  };
+  renderAutohunt(state.autohuntData || { processes: [], collected: [] }, panel("autohunt").querySelector(".panel-body"));
+  try {
+    const job = await request("/api/autohunt/hunt", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ limit, coins, swing: false }),
+    });
+    if (token !== state.autohuntHuntToken) return;
+    state.autohuntHuntId = job.job_id || "";
+    state.autohuntHunt = job;
+    sessionStorage.setItem("hl.autohuntJob", state.autohuntHuntId);
+    renderAutohunt(state.autohuntData || { processes: [], collected: [] }, panel("autohunt").querySelector(".panel-body"));
+    pollAutohuntHunt(state.autohuntHuntId);
+  } catch (error) {
+    if (token !== state.autohuntHuntToken) return;
+    state.autohuntHunt = { status: "error", coins, error: apiErrorText(error), results: [] };
+    renderAutohunt(state.autohuntData || { processes: [], collected: [] }, panel("autohunt").querySelector(".panel-body"));
+  }
+}
+
+async function pollAutohuntHunt(jobId) {
+  const token = ++state.autohuntHuntToken;
+  while (state.autohuntHuntId === jobId) {
+    try {
+      const job = await request(`/api/autohunt/hunt?job_id=${encodeURIComponent(jobId)}`);
+      if (token !== state.autohuntHuntToken || state.autohuntHuntId !== jobId) return;
+      state.autohuntHunt = job;
+      renderAutohunt(state.autohuntData || { processes: [], collected: [] }, panel("autohunt").querySelector(".panel-body"));
+      if (["success", "error", "not_found"].includes(job.status)) {
+        if (job.status === "not_found") {
+          state.autohuntHuntId = "";
+          sessionStorage.removeItem("hl.autohuntJob");
+        } else if (job.status === "success") {
+          loadView(true);
+        }
+        return;
+      }
+    } catch (_) {
+      // Keep polling; a brief local-server or proxy hiccup should not lose the job.
+    }
+    await new Promise((resolve) => setTimeout(resolve, 1000));
+  }
+}
+// ---------------------------------------------------------------- 链上分析
 
 function amountText(value) {
   const number = Number(value);
@@ -2637,7 +3525,7 @@ function endpoint(view, rawAddress = "") {
   }
   if (view === "tpsl") return `/api/tpsl?address=${address}`;
   if (view === "history") return `/api/history?address=${address}`;
-  if (view === "autohunt") return "/api/autohunt";
+  if (view === "autohunt") return "/api/autohunt?positions=0";
   if (view === "whale") return "/api/whale";
   if (view === "whale-tx") return "/api/whale/tx/analysis?asset=" + encodeURIComponent(state.wtaAsset) + "&window=" + encodeURIComponent(state.wtaWindow);
   if (view === "settings") return "/api/settings";
@@ -2728,6 +3616,9 @@ function setView(view) {
     node.classList.toggle("active", node.dataset.panel === view);
   }
   renderAccountPickers();
+  if (view === "autohunt" && state.autohuntQuery) {
+    setTimeout(() => loadAutohuntSearch(), 0);
+  }
   if (view === "chart" && state.chart) {
     setTimeout(() => state.chart.applyOptions({
       width: els.priceChart.clientWidth,
@@ -2911,7 +3802,9 @@ async function loadState() {
 
 els.viewNav.addEventListener("click", (event) => {
   const button = event.target.closest(".nav-button");
-  if (!button || button.dataset.view === state.view) return;
+  if (!button) return;
+  setSidebarOpen(false);
+  if (button.dataset.view === state.view) return;
   setView(button.dataset.view);
   loadView(true);
 });
@@ -3118,6 +4011,29 @@ els.wtaWindow.addEventListener("click", (event) => {
   }
   loadWta();
 });
+let autohuntSearchTimer = null;
+els.autohuntSearch.addEventListener("input", () => {
+  clearTimeout(autohuntSearchTimer);
+  autohuntSearchTimer = setTimeout(() => {
+    state.autohuntQuery = els.autohuntSearch.value;
+    localStorage.setItem("hl.autohuntQuery", state.autohuntQuery);
+    if (state.view === "autohunt") loadAutohuntSearch();
+  }, 300);
+});
+els.autohuntSearch.addEventListener("keydown", (event) => {
+  if (event.key === "Enter") {
+    event.preventDefault();
+    clearTimeout(autohuntSearchTimer);
+    state.autohuntQuery = els.autohuntSearch.value;
+    localStorage.setItem("hl.autohuntQuery", state.autohuntQuery);
+    if (state.view === "autohunt") loadAutohuntSearch();
+  }
+});
+els.autohuntLimit.value = localStorage.getItem("hl.autohuntLimit") || "0";
+els.autohuntLimit.addEventListener("change", () => {
+  localStorage.setItem("hl.autohuntLimit", els.autohuntLimit.value);
+});
+els.autohuntHunt.addEventListener("click", runAutohuntHunt);
 els.settingsSave.addEventListener("click", () => saveSettings(false));
 els.settingsReset.addEventListener("click", () => saveSettings(true));
 els.whaleScan.addEventListener("click", runWhaleScan);
@@ -3131,6 +4047,22 @@ els.whaleToken.addEventListener("keydown", (event) => {
   event.preventDefault();
   runWhaleScan();
 });
+els.accountDetail.addEventListener("click", (event) => {
+  if (event.target === els.accountDetail) closeAccountDetail();
+});
+els.accountDetailClose.addEventListener("click", closeAccountDetail);
+els.accountDetailWindow.addEventListener("click", (event) => {
+  const button = event.target.closest("button[data-window]");
+  if (!button) return;
+  state.accountDetailWindow = button.dataset.window;
+  localStorage.setItem("hl.accountDetailWindow", state.accountDetailWindow);
+  const current = state.accountDetail;
+  if (current?.address) requestAccountDetail(current.address, current.alias);
+});
+document.addEventListener("keydown", (event) => {
+  if (event.key === "Escape" && !els.accountDetail.hidden) closeAccountDetail();
+});
+
 els.sidebarToggle.addEventListener("click", () => setSidebarOpen(!els.sidebar.classList.contains("open")));
 els.sidebarClose.addEventListener("click", () => setSidebarOpen(false));
 els.sidebarBackdrop.addEventListener("click", () => setSidebarOpen(false));
