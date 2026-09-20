@@ -97,6 +97,7 @@ class WebApp:
         self.autohunt_position_cache = {}
         self.autohunt_position_cache_lock = threading.Lock()
         self.account_detail_cache = {}
+        self.account_summary_cache = {}
         self.account_detail_lock = threading.Lock()
         self.autohunt_position_cache_ttl = 60.0
         self.hunt_jobs = {}
@@ -868,6 +869,35 @@ class WebApp:
             return 0.0
 
     @staticmethod
+    def _position_open_times(rows):
+        """Derive current position open times from fills in chronological order."""
+        changes = {}
+        for row in rows or []:
+            coin = str(row.get("coin") or "").strip()
+            size = abs(_num(row.get("sz")))
+            if not coin or size <= 1e-12:
+                continue
+            side = str(row.get("side") or "").upper()
+            delta = size if side == "B" else -size if side == "A" else 0.0
+            if abs(delta) <= 1e-12:
+                continue
+            changes.setdefault(coin, []).append((int(_num(row.get("time"))), delta))
+
+        result = {}
+        for coin, coin_rows in changes.items():
+            net = 0.0
+            opened_at = 0
+            for ts, delta in sorted(coin_rows, key=lambda item: item[0]):
+                before = net
+                net += delta
+                if abs(net) <= 1e-12:
+                    opened_at = 0
+                elif abs(before) <= 1e-12 or before * net < 0:
+                    opened_at = ts
+            result[coin] = {"time": opened_at, "sign": 1 if net > 1e-12 else -1 if net < -1e-12 else 0}
+        return result
+
+    @staticmethod
     def _fills_stats(rows):
         stats = {
             "count": len(rows), "volume": 0.0, "realized_pnl": 0.0,
@@ -894,6 +924,97 @@ class WebApp:
         stats["win_rate"] = stats["win_count"] / closed if closed else 0.0
         stats["by_coin"] = sorted(stats["by_coin"].values(), key=lambda row: row["volume"], reverse=True)
         return stats
+
+    def account_summary_data(self, raw_address, raw_window="24h"):
+        """Fast top metrics only; detail tables load separately."""
+        address = normalize_address(raw_address)
+        window = str(raw_window or "24h").lower()
+        if window not in {"24h", "48h", "7d", "30d", "all"}:
+            window = "24h"
+        cache_key = f"{address}:{window}"
+        now_ms = int(time.time() * 1000)
+        with self.account_detail_lock:
+            cached = self.account_summary_cache.get(cache_key)
+            if cached and now_ms - cached["generated_at"] < 30_000:
+                return cached
+
+        month_start = now_ms - 30 * 24 * 3600_000
+        fetch_all = window == "all"
+
+        def fetch_portfolio():
+            return self.monitor.api.portfolio(address) or []
+
+        def fetch_state():
+            return self.monitor.api.clearinghouse_state(address) or {}
+
+        def fetch_fills():
+            if fetch_all:
+                return self.monitor.api.user_fills(address) or []
+            return self.monitor.api.user_fills_by_time(address, month_start) or []
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=3) as pool:
+            futures = {
+                "portfolio": pool.submit(fetch_portfolio),
+                "state": pool.submit(fetch_state),
+                "fills": pool.submit(fetch_fills),
+            }
+            portfolio = futures["portfolio"].result()
+            state = futures["state"].result()
+            all_fills = futures["fills"].result()
+
+        fills_24h = [row for row in all_fills if int(_num(row.get("time"))) >= now_ms - 24 * 3600_000]
+        fills_48h = [row for row in all_fills if int(_num(row.get("time"))) >= now_ms - 48 * 3600_000]
+        fills_7d = [row for row in all_fills if int(_num(row.get("time"))) >= now_ms - 7 * 24 * 3600_000]
+        fills_30d = [row for row in all_fills if int(_num(row.get("time"))) >= month_start]
+        selected_fills = {
+            "24h": fills_24h, "48h": fills_48h, "7d": fills_7d,
+            "30d": fills_30d, "all": all_fills,
+        }[window]
+        selected_stats = self._fills_stats(selected_fills)
+
+        all_series, total_pnl, _, all_volume = self._portfolio_series(portfolio, "allTime")
+        drawdown_usd, drawdown_pct = _max_drawdown([row[1] for row in all_series])
+        margin = state.get("marginSummary") or {}
+        position_count = 0
+        for item in state.get("assetPositions") or []:
+            position = item.get("position") if isinstance(item, dict) else None
+            if position and abs(_num(position.get("szi"))) > 0:
+                position_count += 1
+
+        collected = self.store.get_collected_accounts()
+        account_info = next((row for row in collected if row["address"] == address), None)
+        result = {
+            "type": "account_summary",
+            "address": address,
+            "window": window,
+            "account": account_info,
+            "summary": {
+                "account_value": _num(margin.get("accountValue")),
+                "margin_used": _num(margin.get("totalMarginUsed")),
+                "notional": _num(margin.get("totalNtlPos")),
+                "total_pnl": total_pnl,
+                "pnl_24h": self._fills_stats(fills_24h)["realized_pnl"],
+                "pnl_48h": self._fills_stats(fills_48h)["realized_pnl"],
+                "pnl_7d": self._fills_stats(fills_7d)["realized_pnl"],
+                "pnl_30d": self._fills_stats(fills_30d)["realized_pnl"],
+                "period_pnl": selected_stats["realized_pnl"],
+                "period_volume": selected_stats["volume"],
+                "all_volume": all_volume,
+                "trade_count": selected_stats["count"],
+                "win_rate": selected_stats["win_rate"],
+                "fees": selected_stats["fees"],
+                "max_drawdown_usd": drawdown_usd,
+                "max_drawdown_pct": drawdown_pct,
+                "position_count": position_count,
+                "order_count": 0,
+            },
+            "generated_at": now_ms,
+        }
+        with self.account_detail_lock:
+            for key in list(self.account_summary_cache)[:-39]:
+                self.account_summary_cache.pop(key, None)
+            self.account_summary_cache[cache_key] = result
+        return result
 
     def account_detail_data(self, raw_address, raw_window="24h"):
         """聚合单个 Hyperliquid 账户的 Coinglass 式详情数据。"""
@@ -947,6 +1068,7 @@ class WebApp:
             raw_orders = futures["orders"].result()
             all_fills = futures["fills"].result()
             ledger = futures["ledger"].result()
+        open_times = self._position_open_times(all_fills)
 
         fills_24h = [row for row in all_fills if int(_num(row.get("time"))) >= now_ms - 24 * 3600_000]
         fills_48h = [row for row in all_fills if int(_num(row.get("time"))) >= now_ms - 48 * 3600_000]
@@ -990,6 +1112,8 @@ class WebApp:
             if not str(position.get("coin") or "").strip() or abs(szi) <= 0:
                 continue
             leverage = position.get("leverage") or {}
+            open_info = open_times.get(str(position.get("coin") or ""))
+            open_time = int(open_info.get("time") or 0) if open_info and open_info.get("sign") == (1 if szi > 0 else -1) else 0
             positions.append({
                 "coin": self.monitor.coin_label(str(position.get("coin"))),
                 "side": "做多" if szi > 0 else "做空",
@@ -1003,6 +1127,7 @@ class WebApp:
                 "margin": _num(position.get("marginUsed")),
                 "liquidation": _num(position.get("liquidationPx")),
                 "funding_since_open": _num((position.get("cumFunding") or {}).get("sinceOpen")) if isinstance(position.get("cumFunding"), dict) else 0.0,
+                "open_time": int(_num(position.get("openTime"))) or open_time,
             })
         positions.sort(key=lambda row: row["notional"], reverse=True)
 
@@ -2341,6 +2466,8 @@ class WebRequestHandler(BaseHTTPRequestHandler):
                 self._send_json(200, {"results": self.app.autohunt_leaderboard_search((query.get("q") or [""])[0], (query.get("limit") or ["30"])[0])})
             elif path == "/api/autohunt/hunt":
                 self._send_json(200, self.app.autohunt_hunt_status((query.get("job_id") or [""])[0]))
+            elif path == "/api/account/summary":
+                self._send_json(200, self.app.account_summary_data(address, (query.get("window") or ["24h"])[0]))
             elif path == "/api/account/detail":
                 self._send_json(200, self.app.account_detail_data(address, (query.get("window") or ["24h"])[0]))
             elif path == "/api/autohunt/positions":
@@ -2355,6 +2482,8 @@ class WebRequestHandler(BaseHTTPRequestHandler):
                 self._send_json(404, {"error": "API not found"})
             else:
                 self._static(path)
+        except ConnectionError:
+            return
         except Exception as exc:
             self._send_json(500, {"error": str(exc)})
 
@@ -2394,6 +2523,8 @@ class WebRequestHandler(BaseHTTPRequestHandler):
                 )
             else:
                 self._send_json(404, {"error": "API not found"})
+        except ConnectionError:
+            return
         except Exception as exc:
             self._send_json(400, {"error": str(exc)})
 
@@ -2405,6 +2536,8 @@ class WebRequestHandler(BaseHTTPRequestHandler):
             return
         try:
             self._send_json(200, {"account": self.app.remove_account(match.group(1))})
+        except ConnectionError:
+            return
         except Exception as exc:
             if isinstance(exc, KeyError):
                 status = 404

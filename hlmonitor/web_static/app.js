@@ -170,6 +170,58 @@ function shortAddress(address) {
   return address ? `${address.slice(0, 6)}...${address.slice(-4)}` : "";
 }
 
+function coinToken(coin) {
+  const text = String(coin || "").trim();
+  return text.split("/")[0].replace(/^@/, "");
+}
+
+function coinIcon(coin) {
+  const token = coinToken(coin);
+  const wrap = make("span", "coin-icon-wrap");
+  if (!token) return wrap;
+  const image = document.createElement("img");
+  let triedFallback = false;
+  image.className = "coin-icon";
+  image.src = `https://assets.coincap.io/assets/icons/${encodeURIComponent(token.toLowerCase())}@2x.png`;
+  image.alt = "";
+  image.loading = "lazy";
+  image.addEventListener("error", () => {
+    if (triedFallback) {
+      wrap.classList.add("fallback");
+      wrap.textContent = token.slice(0, 1).toUpperCase();
+      return;
+    }
+    triedFallback = true;
+    image.src = `https://cdn.jsdelivr.net/gh/spothq/cryptocurrency-icons@master/svg/color/${encodeURIComponent(token.toLowerCase())}.svg`;
+  });
+  wrap.append(image);
+  return wrap;
+}
+
+function coinCell(coin, className = "") {
+  const node = cell("", `coin-cell ${className}`.trim());
+  node.append(coinIcon(coin), make("span", "coin-name", coin || "-"));
+  return node;
+}
+
+function coinLabel(coin, text) {
+  const node = make("span", "coin-label");
+  node.append(coinIcon(coin), make("span", "", text || coin || "-"));
+  return node;
+}
+
+function coinSelectIcon(select, coin) {
+  if (!select) return;
+  const token = coinToken(coin);
+  if (!token) {
+    select.classList.remove("coin-select");
+    select.style.removeProperty("--coin-icon");
+    return;
+  }
+  select.classList.add("coin-select");
+  select.style.setProperty("--coin-icon", `url("https://assets.coincap.io/assets/icons/${encodeURIComponent(token.toLowerCase())}@2x.png")`);
+}
+
 // 金额风格由设置页统一控制，全站只走这一条格式化路径。
 const AMOUNT_FORMATS = ["cn", "compact", "full"];
 const AMOUNT_FORMAT_LABELS = { cn: "中文单位", compact: "英文紧凑", full: "完整数字" };
@@ -241,6 +293,8 @@ function sideText(row) {
   const side = String(row.side || "").toUpperCase();
   return side === "B" ? "做多" : side === "A" ? "做空" : "-";
 }
+function sideClass(side) { return side === "做多" ? "positive" : side === "做空" ? "negative" : ""; }
+function sideCell(side) { return cell(side || "-", sideClass(side)); }
 
 async function request(url, options = {}) {
   const response = await fetch(url, options);
@@ -563,7 +617,7 @@ function renderOverview(data, body) {
   body.append(metrics, sectionTitle("合约持仓"));
   const rows = data.positions.map((row) => [
     ...(data.multi ? [cell(row.account || "合计")] : []),
-    cell(row.coin),
+    coinCell(row.coin),
     cell(sideText(row)),
     cell(qty.format(Math.abs(row.szi))),
     cell(formatAmount(row.notional)),
@@ -575,7 +629,7 @@ function renderOverview(data, body) {
   if (data.spot.length) {
     body.append(sectionTitle("现货余额"));
     body.append(table(["币种", "余额", "冻结"], data.spot.slice(0, 30).map((row) => [
-      cell(row.coin), cell(qty.format(row.total)), cell(qty.format(row.hold)),
+      coinCell(row.coin), cell(qty.format(row.total)), cell(qty.format(row.hold)),
     ])));
   }
 }
@@ -590,13 +644,13 @@ function renderFills(data, body) {
   );
   body.append(metrics, sectionTitle("币种统计"));
   body.append(table(["币种", "笔数", "成交额", "买入", "卖出", "盈亏"], data.coins.slice(0, 20).map((row) => [
-    cell(row.coin), cell(String(row.count)), cell(formatAmount(row.notional)),
+    coinCell(row.coin), cell(String(row.count)), cell(formatAmount(row.notional)),
     cell(formatAmount(row.buy)), cell(formatAmount(row.sell)), cell(signed(row.pnl), pnlClass(row.pnl)),
   ])));
   body.append(sectionTitle("最近成交"));
   body.append(table((data.multi ? ["账户"] : []).concat(["时间", "币种", "方向", "数量", "价格", "金额", "盈亏"]), data.recent.slice(0, 30).map((row) => [
     ...(data.multi ? [cell(row.account || "—")] : []),
-    cell(timeText(row.time)), cell(row.coin), cell(sideText(row)), cell(qty.format(row.size)),
+    cell(timeText(row.time)), coinCell(row.coin), sideCell(sideText(row)), cell(qty.format(row.size)),
     cell(qty.format(row.price)), cell(formatAmount(row.notional)), cell(signed(row.closed_pnl), pnlClass(row.closed_pnl)),
   ])));
 }
@@ -1074,7 +1128,7 @@ function renderPositionPopup(data, position, event) {
   const titleText = make("div", "position-popup-title");
   titleText.append(
     make("span", `position-side ${position.side === "做多" ? "long" : "short"}`, position.side),
-    make("span", "", `${coin}${isAutohunt ? " Autohunt 聚合仓位" : " 仓位"}`),
+    coinLabel(coin, `${coin}${isAutohunt ? " Autohunt 聚合仓位" : " 仓位"}`),
   );
   const close = make("button", "position-close", "×");
   close.type = "button";
@@ -1313,7 +1367,7 @@ function renderChart(data) {
   state.candleSeries.applyOptions({ priceFormat: priceFormat(data.current_price || data.candles.at(-1)?.close || 1) });
   state.candleSeries.setData(data.candles);
   state.volumeSeries.setData(data.volumes);
-  els.chartSymbolLabel.textContent = `${data.coin} · ${data.interval}`;
+  els.chartSymbolLabel.replaceChildren(coinIcon(data.coin), make("span", "", `${data.coin} · ${data.interval}`));
   els.autohuntProcess.textContent = data.whale_process ? `进程 ${data.whale_process}` : "未选择";
   drawChartOverlays(data);
   requestAnimationFrame(() => {
@@ -1346,6 +1400,7 @@ function renderChartSymbols(data) {
     els.chartSymbol.append(option);
   }
   els.chartSymbol.value = state.chartCoin;
+  coinSelectIcon(els.chartSymbol, state.chartCoin);
 }
 
 function relativeTime(ms) {
@@ -1425,6 +1480,55 @@ function bindAutohuntPnlTriggers(root) {
   });
 }
 
+function autohuntCollapsedSet() {
+  try {
+    const raw = JSON.parse(localStorage.getItem("hl.autohuntCollapsed") || "[]");
+    return new Set(Array.isArray(raw) ? raw : []);
+  } catch (_) {
+    return new Set();
+  }
+}
+
+function autohuntCollapsed(key) {
+  return autohuntCollapsedSet().has(key);
+}
+
+function setAutohuntCollapsed(key, collapsed) {
+  const set = autohuntCollapsedSet();
+  if (collapsed) set.add(key);
+  else set.delete(key);
+  localStorage.setItem("hl.autohuntCollapsed", JSON.stringify([...set]));
+}
+
+function bindAutohuntCollapse(head, key, content) {
+  const collapsed = autohuntCollapsed(key);
+  const caret = make("span", `onchain-caret${collapsed ? " collapsed" : ""}`, "▾");
+  head.classList.add("autohunt-collapse-head");
+  head.setAttribute("aria-expanded", String(!collapsed));
+  head.prepend(caret);
+
+  const apply = () => {
+    const nowCollapsed = autohuntCollapsed(key);
+    if (content) content.classList.toggle("autohunt-collapse-body", true);
+    if (content) content.classList.toggle("collapsed", nowCollapsed);
+    head.setAttribute("aria-expanded", String(!nowCollapsed));
+    caret.classList.toggle("collapsed", nowCollapsed);
+  };
+  clickableToggle(head, collapsed, () => {
+    setAutohuntCollapsed(key, !autohuntCollapsed(key));
+    apply();
+  });
+  apply();
+}
+
+function aliasCell(value) {
+  const node = cell(value || "-");
+  node.title = value
+    ? "别名：地址的显示名称；Autohunt 结果通常使用 Hyperliquid 排行榜昵称。"
+    : "别名是地址的显示名称；Autohunt 结果通常使用 Hyperliquid 排行榜昵称，手动订阅地址可在 Telegram 里命名。";
+  return node;
+}
+
 function renderAutohuntPnlCard() {
   const current = state.autohuntPnl;
   if (!current) return null;
@@ -1437,7 +1541,8 @@ function renderAutohuntPnlCard() {
   close.type = "button";
   close.setAttribute("aria-label", "关闭收益曲线");
   close.append(make("span", "", "×"));
-  close.addEventListener("click", () => {
+  close.addEventListener("click", (event) => {
+    event.stopPropagation();
     state.autohuntPnlAddress = "";
     state.autohuntPnlAlias = "";
     state.autohuntPnl = null;
@@ -1447,17 +1552,19 @@ function renderAutohuntPnlCard() {
     renderAutohunt(state.autohuntData, panel("autohunt").querySelector(".panel-body"));
   });
   head.append(title, close);
-  card.append(head);
+  const content = make("div", "autohunt-collapse-body");
+  bindAutohuntCollapse(head, `pnl:${current.address}`, content);
+  card.append(head, content);
 
   if (current.loading) {
     const loading = make("div", "pnl-loading");
     for (let index = 0; index < 3; index += 1) loading.append(make("i"));
     loading.append(make("span", "", "正在读取累计盈亏..."));
-    card.append(loading);
+    content.append(loading);
     return card;
   }
   if (current.error) {
-    card.append(make("div", "state-error", current.error));
+    content.append(make("div", "state-error", current.error));
     return card;
   }
 
@@ -1474,11 +1581,11 @@ function renderAutohuntPnlCard() {
     metric("最大回撤", stats.max_drawdown_pct == null ? "-" : `${Number(stats.max_drawdown_pct).toFixed(2)}%`),
     metric("评分", info.score ? (Number(info.score) * 100).toFixed(0) + "/100" : "-"),
   );
-  card.append(metrics);
+  content.append(metrics);
 
   const chartWrap = make("div", "pnl-chart");
   chartWrap.dataset.address = current.address;
-  card.append(chartWrap);
+  content.append(chartWrap);
   const hint = make("div", "pnl-hint");
   if (Number(stats.point_count) > 0) {
     hint.append(
@@ -1488,7 +1595,7 @@ function renderAutohuntPnlCard() {
   } else {
     hint.append(make("span", "", "该账户暂时没有历史收益数据"));
   }
-  card.append(hint);
+  content.append(hint);
 
   if ((data.points || []).length) {
     const token = current.token;
@@ -1498,7 +1605,6 @@ function renderAutohuntPnlCard() {
   }
   return card;
 }
-
 function mountAutohuntPnlChart(container, data) {
   if (!window.LightweightCharts) return;
   destroyAutohuntPnlChart();
@@ -1528,6 +1634,9 @@ function mountAutohuntPnlChart(container, data) {
       timeVisible: true,
       secondsVisible: false,
       rightOffset: 0,
+      fixLeftEdge: true,
+      fixRightEdge: true,
+      allowEdgesExceedingData: false,
     },
     localization: { priceFormatter: (value) => formatAmount(value) },
     crosshair: { mode: LightweightCharts.CrosshairMode.Normal },
@@ -1566,9 +1675,24 @@ function destroyAccountDetailChart() {
   }
 }
 
-function accountDonut(title, rows, valueFormatter = formatAmount, signColor = false) {
+function accountDonut(title, rows, valueFormatter = formatAmount, signColor = false, summary = null) {
   const card = make("div", "donut-card");
+  card.title = "鼠标悬浮查看标的与占比";
   card.append(make("div", "donut-title", title));
+  const body = make("div", "donut-body");
+  let summaryNode = null;
+  if (summary) {
+    card.classList.add("with-summary");
+    summaryNode = make("div", "donut-summary");
+    summaryNode.append(make("div", "donut-summary-total", formatAmount(summary.total)));
+    const summaryRows = make("div", "donut-summary-rows");
+    const countRow = make("div", "donut-summary-row");
+    countRow.append(make("span", "donut-summary-label", "仓位"), make("span", "donut-summary-row-value", String(summary.count || 0)));
+    const leverageRow = make("div", "donut-summary-row");
+    leverageRow.append(make("span", "donut-summary-label", "杠杆"), make("span", "donut-summary-row-value", summary.leverage > 0 ? `${summary.leverage.toFixed(2)}x` : "-"));
+    summaryRows.append(countRow, leverageRow);
+    summaryNode.append(summaryRows);
+  }
   const values = (rows || []).filter((row) => Number(row.value) !== 0).slice(0, 8);
   const total = values.reduce((sum, row) => sum + Math.abs(Number(row.value) || 0), 0);
   const center = make("div", "donut-visual");
@@ -1585,6 +1709,7 @@ function accountDonut(title, rows, valueFormatter = formatAmount, signColor = fa
     const value = Math.abs(Number(row.value) || 0);
     const fraction = total > 0 ? value / total : 0;
     const circle = document.createElementNS("http://www.w3.org/2000/svg", "circle");
+    circle.classList.add("donut-segment");
     circle.setAttribute("cx", "75");
     circle.setAttribute("cy", "75");
     circle.setAttribute("r", String(radius));
@@ -1601,37 +1726,53 @@ function accountDonut(title, rows, valueFormatter = formatAmount, signColor = fa
     svg.append(circle);
     offset += fraction;
   });
-  const centerText = document.createElementNS("http://www.w3.org/2000/svg", "text");
-  centerText.setAttribute("x", "75");
-  centerText.setAttribute("y", "72");
-  centerText.setAttribute("text-anchor", "middle");
-  centerText.classList.add("donut-total");
-  centerText.textContent = total ? valueFormatter(signColor ? values.reduce((sum, row) => sum + Number(row.value || 0), 0) : total) : "-";
-  const centerLabel = document.createElementNS("http://www.w3.org/2000/svg", "text");
-  centerLabel.setAttribute("x", "75");
-  centerLabel.setAttribute("y", "90");
-  centerLabel.setAttribute("text-anchor", "middle");
-  centerLabel.classList.add("donut-label");
-  centerLabel.textContent = values.length ? "合计" : "暂无";
-  svg.append(centerText, centerLabel);
-  center.append(svg);
 
-  const legend = make("div", "donut-legend");
-  if (!values.length) {
-    legend.append(make("div", "donut-empty", "该区间没有数据"));
-  }
+  const centerTitle = document.createElementNS("http://www.w3.org/2000/svg", "text");
+  centerTitle.setAttribute("x", "75");
+  centerTitle.setAttribute("y", "62");
+  centerTitle.setAttribute("text-anchor", "middle");
+  centerTitle.classList.add("donut-center-name");
+  const centerValue = document.createElementNS("http://www.w3.org/2000/svg", "text");
+  centerValue.setAttribute("x", "75");
+  centerValue.setAttribute("y", "81");
+  centerValue.setAttribute("text-anchor", "middle");
+  centerValue.classList.add("donut-center-value");
+  const centerPercent = document.createElementNS("http://www.w3.org/2000/svg", "text");
+  centerPercent.setAttribute("x", "75");
+  centerPercent.setAttribute("y", "98");
+  centerPercent.setAttribute("text-anchor", "middle");
+  centerPercent.classList.add("donut-center-percent");
+  svg.append(centerTitle, centerValue, centerPercent);
+
   values.forEach((row, index) => {
-    const item = make("div", "donut-item");
-    const dot = make("i", "donut-dot");
-    dot.style.background = colors[index % colors.length];
-    item.append(dot, make("span", "donut-name", row.name || "-"), make("span", "donut-value", valueFormatter(Number(row.value) || 0)));
-    if (signColor) item.querySelector(".donut-value").classList.add(pnlClass(Number(row.value) || 0));
-    legend.append(item);
+    const circle = svg.querySelectorAll(".donut-segment")[index];
+    if (!circle) return;
+    circle.addEventListener("mouseenter", () => {
+      const rawValue = Number(row.value) || 0;
+      const fraction = total > 0 ? Math.abs(rawValue) / total : 0;
+      centerTitle.textContent = row.name || "-";
+      centerValue.textContent = valueFormatter(signColor ? rawValue : Math.abs(rawValue));
+      centerValue.classList.toggle("positive", signColor && rawValue > 0);
+      centerValue.classList.toggle("negative", signColor && rawValue < 0);
+      centerPercent.textContent = fraction > 0 ? `${(fraction * 100).toFixed(2)}%` : "-";
+    });
+    circle.addEventListener("mouseleave", () => {
+      centerTitle.textContent = "";
+      centerValue.textContent = "";
+      centerPercent.textContent = "";
+    });
   });
-  card.append(center, legend);
+
+  center.append(svg);
+  if (summaryNode) {
+    body.append(summaryNode, center);
+    card.append(body);
+  } else {
+    card.append(center);
+  }
+  if (!values.length) card.append(make("div", "donut-empty", "该区间没有数据"));
   return card;
 }
-
 function mountAccountDetailChart(container, data) {
   if (!window.LightweightCharts) return;
   destroyAccountDetailChart();
@@ -1650,7 +1791,7 @@ function mountAccountDetailChart(container, data) {
     layout: { background: { type: "solid", color: "transparent" }, textColor: "#9b9b9b", fontSize: 11 },
     grid: { vertLines: { visible: false }, horzLines: { color: "rgba(255,255,255,.055)" } },
     rightPriceScale: { borderColor: "#303030" },
-    timeScale: { borderColor: "#303030", timeVisible: true, secondsVisible: false, rightOffset: 0 },
+    timeScale: { borderColor: "#303030", timeVisible: true, secondsVisible: false, rightOffset: 0, fixLeftEdge: true, fixRightEdge: true, allowEdgesExceedingData: false },
     localization: { priceFormatter: (value) => formatAmount(value) },
     crosshair: { mode: LightweightCharts.CrosshairMode.Normal },
   });
@@ -1684,9 +1825,11 @@ function motionReady() {
 
 function animateMetricNumbers(container) {
   if (!motionReady()) return;
-  container.querySelectorAll("[data-raw-value]").forEach((node, index) => {
-    const target = Number(node.dataset.rawValue);
-    const formatter = String(node.dataset.formatter || "formatAmount");
+  container.querySelectorAll("[data-raw-value]").forEach((card, index) => {
+    const node = card.querySelector(".metric-value");
+    if (!node) return;
+    const target = Number(card.dataset.rawValue);
+    const formatter = String(card.dataset.formatter || "formatAmount");
     if (!Number.isFinite(target)) return;
     anime({
       targets: { value: 0 },
@@ -1738,7 +1881,7 @@ function accountDetailSection(title, headers, rows, emptyText) {
   return wrap;
 }
 
-function renderAccountDetail(data, animateContent = false) {
+function renderAccountDetail(data, animateContent = false, partial = false) {
   const info = data.account || {};
   const stats = data.summary || {};
   const title = info.alias || shortAddress(data.address);
@@ -1765,12 +1908,31 @@ function renderAccountDetail(data, animateContent = false) {
     accountMetric("最大回撤", stats.max_drawdown_pct == null ? "-" : `${Number(stats.max_drawdown_pct).toFixed(2)}%`),
   );
   root.append(metrics);
+  if (partial) {
+    const loading = make("div", "detail-loading");
+    for (let index = 0; index < 3; index += 1) loading.append(make("i"));
+    loading.append(make("span", "", "正在加载图表、饼图和明细..."));
+    root.append(loading);
+    if (animateContent) {
+      if (motionReady()) anime({ targets: metrics, opacity: [0, 1], translateY: [12, 0], duration: 460, easing: "easeOutCubic" });
+      animateMetricNumbers(metrics);
+    }
+    return;
+  }
 
   const chart = make("div", "detail-chart");
   root.append(chart);
   const pies = make("div", "detail-pies");
+  const averageLeverage = Number(stats.margin_used) > 0
+    ? (Number(stats.notional) || 0) / (Number(stats.margin_used) || 0)
+    : 0;
+  const positionSummary = {
+    total: Number(stats.notional) || 0,
+    count: Number(stats.position_count) || data.positions.length || 0,
+    leverage: averageLeverage,
+  };
   pies.append(
-    accountDonut("仓位分布", data.pies?.positions || [], formatAmount),
+    accountDonut("永续合约仓位价值", data.pies?.positions || [], formatAmount, false, positionSummary),
     accountDonut("成交分布", data.pies?.volume || [], formatAmount),
     accountDonut("盈亏分布", data.pies?.pnl || [], signed, true),
   );
@@ -1800,12 +1962,12 @@ function renderAccountDetail(data, animateContent = false) {
   const panelBody = make("div", "detail-tab-panel");
   if (state.accountDetailTab === "positions") {
     panelBody.append(accountDetailSection(
-      "合约仓位", ["币种", "方向", "数量", "开仓均价", "仓位价值", "未实现盈亏", "ROE", "杠杆", "保证金", "强平价"],
+      "合约仓位", ["币种", "方向", "数量", "开仓均价", "仓位价值", "未实现盈亏", "ROE", "杠杆", "保证金", "开仓时间", "强平价"],
       data.positions.map((row) => [
-        cell(row.coin), cell(row.side), cell(qty.format(row.size)), cell(priceText(row.entry)),
+        coinCell(row.coin), sideCell(row.side), cell(qty.format(row.size)), cell(priceText(row.entry)),
         cell(formatAmount(row.notional)), cell(signed(row.pnl), pnlClass(row.pnl)),
         cell(`${(Number(row.roe_pct) || 0).toFixed(2)}%`, pnlClass(row.roe_pct)),
-        cell(`${Number(row.leverage || 0).toFixed(0)}x`), cell(formatAmount(row.margin)), cell(priceText(row.liquidation)),
+        cell(`${Number(row.leverage || 0).toFixed(0)}x`), cell(formatAmount(row.margin)), cell(timeText(row.open_time)), cell(priceText(row.liquidation)),
       ]),
       "当前没有合约仓位。",
     ));
@@ -1813,7 +1975,7 @@ function renderAccountDetail(data, animateContent = false) {
     panelBody.append(accountDetailSection(
       "成交记录", ["时间", "币种", "方向", "价格", "数量", "成交额", "已实现盈亏", "手续费"],
       data.fills.map((row) => [
-        cell(timeText(row.time)), cell(row.coin), cell(sideText(row)), cell(priceText(row.px)),
+        cell(timeText(row.time)), coinCell(row.coin), sideCell(sideText(row)), cell(priceText(row.px)),
         cell(qty.format(Math.abs(Number(row.sz) || 0))), cell(formatAmount(Math.abs(Number(row.px) * Number(row.sz) || 0))),
         cell(signed(row.closedPnl), pnlClass(row.closedPnl)), cell(formatAmount(row.fee)),
       ]),
@@ -1823,7 +1985,7 @@ function renderAccountDetail(data, animateContent = false) {
     panelBody.append(accountDetailSection(
       "当前委托", ["时间", "币种", "方向", "价格", "数量", "委托金额", "只减仓", "订单 ID"],
       data.orders.map((row) => [
-        cell(timeText(row.time)), cell(row.coin), cell(row.side), cell(priceText(row.price)),
+        cell(timeText(row.time)), coinCell(row.coin), cell(row.side), cell(priceText(row.price)),
         cell(qty.format(row.size)), cell(formatAmount(row.notional)), cell(row.reduce_only ? "是" : "否"), cell(String(row.oid || "-")),
       ]),
       "当前没有普通委托。",
@@ -1832,7 +1994,7 @@ function renderAccountDetail(data, animateContent = false) {
     panelBody.append(accountDetailSection(
       "充值 & 提现", ["时间", "类型", "代币", "金额", "手续费", "对手地址"],
       data.transfers.map((row) => [
-        cell(timeText(row.time)), cell(row.direction), cell(row.token), cell(formatAmount(row.amount)),
+        cell(timeText(row.time)), cell(row.direction), coinCell(row.token), cell(formatAmount(row.amount)),
         cell(formatAmount(row.fee)), addressCell(row.counterparty),
       ]),
       "没有充值或提现记录。",
@@ -1841,7 +2003,7 @@ function renderAccountDetail(data, animateContent = false) {
     panelBody.append(accountDetailSection(
       "现货持仓", ["代币", "总数量", "可用", "冻结", "建仓价值"],
       data.spot.map((row) => [
-        cell(row.coin), cell(qty.format(row.total)), cell(qty.format(row.available)),
+        coinCell(row.coin), cell(qty.format(row.total)), cell(qty.format(row.available)),
         cell(qty.format(row.hold)), cell(formatAmount(row.entry_value)),
       ]),
       "当前没有现货余额。",
@@ -1879,7 +2041,18 @@ async function requestAccountDetail(address, alias = "") {
   els.accountDetailBody.append(loading);
   destroyAccountDetailChart();
   try {
+    let detailLoaded = false;
+    const summaryUrl = `/api/account/summary?address=${encodeURIComponent(address)}&window=${encodeURIComponent(windowValue)}`;
+    request(summaryUrl).then((summary) => {
+      if (detailLoaded || token !== state.accountDetailToken) return;
+      renderAccountDetail({
+        ...summary,
+        positions: [], fills: [], orders: [], transfers: [], spot: [],
+        pies: {}, pnl_series: [], partial: true,
+      }, true, true);
+    }).catch(() => {});
     const data = await request(`/api/account/detail?address=${encodeURIComponent(address)}&window=${encodeURIComponent(windowValue)}`);
+    detailLoaded = true;
     if (token !== state.accountDetailToken) return;
     state.accountDetail = { loading: false, address, alias, window: windowValue, error: "", data };
     renderAccountDetail(data, true);
@@ -1972,12 +2145,20 @@ function renderAutohuntHuntCard() {
   if (!job || job.status === "not_found") return null;
   const card = make("div", "hunt-card");
   const head = make("div", "hunt-head");
+  const huntScope = make("span", "hunt-scope coin-scope");
+  if (job.coins?.length) {
+    job.coins.forEach((coin) => huntScope.append(coinLabel(coin)));
+  } else {
+    huntScope.textContent = "综合扫描";
+  }
   head.append(
     make("div", "hunt-title", "Hunt 扫描"),
-    make("span", "hunt-scope", huntScopeText(job)),
+    huntScope,
     make("span", `hunt-status ${job.status}`, job.status === "success" ? "完成" : job.status === "error" ? "失败" : "扫描中"),
   );
-  card.append(head);
+  const content = make("div", "autohunt-collapse-body");
+  bindAutohuntCollapse(head, `hunt:${job.job_id || "current"}`, content);
+  card.append(head, content);
 
   if (job.status === "running") {
     const total = Math.max(Number(job.progress_total) || 0, 1);
@@ -1987,25 +2168,25 @@ function renderAutohuntHuntCard() {
     const fill = make("div", "progress-fill");
     fill.style.width = `${pct}%`;
     bar.append(fill);
-    card.append(bar, make("div", "progress-text", `正在精算胜率 ${done}/${total}（${pct}%）`));
+    content.append(bar, make("div", "progress-text", `正在精算胜率 ${done}/${total}（${pct}%）`));
     return card;
   }
   if (job.status === "error") {
-    card.append(make("div", "state-error", job.error || "Hunt 扫描失败"));
+    content.append(make("div", "state-error", job.error || "Hunt 扫描失败"));
     return card;
   }
 
   const results = job.results || [];
-  card.append(make("div", "hunt-meta", `发现 ${results.length} 个账户 · 粗筛 ${job.scanned_count || 0} 个 · 已同步到收集库`));
+  content.append(make("div", "hunt-meta", `发现 ${results.length} 个账户 · 粗筛 ${job.scanned_count || 0} 个 · 已同步到收集库`));
   if (!results.length) {
-    card.append(make("div", "state-empty", "本轮没有符合条件的账户。"));
+    content.append(make("div", "state-empty", "本轮没有符合条件的账户。"));
     return card;
   }
   const rows = results.map((account) => {
     const action = cell("", "table-action");
     action.append(autohuntPnlTrigger(account.address, account.alias));
     return [
-      cell(account.alias || "-"),
+      aliasCell(account.alias),
       addressCell(account.address),
       cell(formatAmount(account.account_value)),
       cell(formatAmount(account.volume)),
@@ -2018,7 +2199,7 @@ function renderAutohuntHuntCard() {
       action,
     ];
   });
-  card.append(table(["别名", "地址", "净值", "成交", "盈亏", "ROI", "胜率", "加权", "样本", "评分", "走势"], rows));
+  content.append(table(["别名", "地址", "净值", "成交", "盈亏", "ROI", "胜率", "加权", "样本", "评分", "走势"], rows));
   return card;
 }
 
@@ -2035,12 +2216,14 @@ function renderAutohuntLeaderboard() {
   const card = make("div", "hunt-card leaderboard-card");
   const head = make("div", "hunt-head");
   head.append(make("div", "hunt-title", "排行榜匹配"), make("span", "hunt-scope", `${rows.length} 个`));
-  card.append(head);
+  const content = make("div", "autohunt-collapse-body");
+  bindAutohuntCollapse(head, "autohunt:leaderboard", content);
+  card.append(head, content);
   const tableRows = rows.map((account) => {
     const action = cell("", "table-action");
     action.append(autohuntPnlTrigger(account.address, account.alias));
     return [
-      cell(account.alias || "-"),
+      aliasCell(account.alias),
       addressCell(account.address),
       cell(formatAmount(account.account_value)),
       cell(formatAmount(account.volume)),
@@ -2049,10 +2232,9 @@ function renderAutohuntLeaderboard() {
       action,
     ];
   });
-  card.append(table(["别名", "地址", "净值", "成交", "盈亏", "ROI", "走势"], tableRows));
+  content.append(table(["别名", "地址", "净值", "成交", "盈亏", "ROI", "走势"], tableRows));
   return card;
 }
-
 function parseAutohuntCoins(query) {
   const values = String(query || "").trim().split(/[,，\s]+/).filter(Boolean);
   if (!values.length) return [];
@@ -2101,8 +2283,16 @@ function renderAutohunt(data, body) {
     title.append(make("span", "process-name", row.name));
     title.append(make("span", `process-status ${row.running ? "running" : row.enabled ? "on" : "off"}`, processStatusText(row)));
     head.append(title);
-    head.append(make("div", "process-scope", row.coins.length ? row.coins.join("、") : "聚合"));
-    card.append(head);
+    const scope = make("div", "process-scope coin-scope");
+    if (row.coins.length) {
+      row.coins.forEach((coin) => scope.append(coinLabel(coin)));
+    } else {
+      scope.textContent = "聚合";
+    }
+    head.append(scope);
+    const content = make("div", "autohunt-collapse-body");
+    bindAutohuntCollapse(head, `autohunt:process:${row.key}`, content);
+    card.append(head, content);
 
     const meta = make("div", "process-meta");
     meta.append(
@@ -2115,7 +2305,7 @@ function renderAutohunt(data, body) {
     if (row.enabled && !row.running && row.next_run) {
       meta.append(make("span", "", `下次 ${relativeTime(row.next_run)}`));
     }
-    card.append(meta);
+    content.append(meta);
 
     if (row.running) {
       const total = Math.max(row.progress_total, 1);
@@ -2125,25 +2315,25 @@ function renderAutohunt(data, body) {
       const fill = make("div", "progress-fill");
       fill.style.width = `${pct}%`;
       bar.append(fill);
-      card.append(bar, make("div", "progress-text", `已扫描 ${done}/${total}（${pct}%）`));
+      content.append(bar, make("div", "progress-text", `已扫描 ${done}/${total}（${pct}%）`));
     }
 
     const positions = row.positions || [];
     const positionTitle = pendingPositions ? "聚合持仓（加载中）" : positions.length ? "聚合持仓（同向、相近价格）" : "聚合持仓（当前无持仓）";
-    card.append(make("div", "process-section-title", positionTitle));
+    content.append(make("div", "process-section-title", positionTitle));
     if (positions.length) {
       const positionRows = positions.map((position) => [
-        cell(position.coin),
-        cell(position.side || "-"),
+        coinCell(position.coin),
+        sideCell(position.side),
         cell(qty.format(Math.abs(Number(position.szi) || 0))),
         cell(priceText(position.entry)),
         cell(formatAmount(position.notional)),
         cell(signed(position.pnl), pnlClass(position.pnl)),
         cell(position.account_count ? String(position.account_count) : "-"),
       ]);
-      card.append(table(["币种", "方向", "数量", "加权均价", "仓位价值", "浮动盈亏", "账户数"], positionRows));
+      content.append(table(["币种", "方向", "数量", "加权均价", "仓位价值", "浮动盈亏", "账户数"], positionRows));
     } else {
-      card.append(make("div", "process-empty", pendingPositions ? "正在读取这些账户的当前持仓..." : state.autohuntPositionsStatus === "error" ? "持仓读取失败，但账户列表已正常显示。" : "这些记录账户当前未平仓头寸。"));
+      content.append(make("div", "process-empty", pendingPositions ? "正在读取这些账户的当前持仓..." : state.autohuntPositionsStatus === "error" ? "持仓读取失败，但账户列表已正常显示。" : "这些记录账户当前未平仓头寸。"));
     }
 
     if (row.accounts.length) {
@@ -2151,27 +2341,31 @@ function renderAutohunt(data, body) {
         const action = cell("", "table-action");
         action.append(autohuntPnlTrigger(account.address, account.alias));
         return [
-          cell(account.alias || "-"),
+          aliasCell(account.alias),
           addressCell(account.address),
           cell(formatAmount(account.account_value)),
           cell(relativeTime(account.scanned_at)),
           action,
         ];
       });
-      card.append(table(["别名", "地址", "账户价值", "记录时间", "走势"], rows));
+      content.append(table(["别名", "地址", "账户价值", "记录时间", "走势"], rows));
     } else {
-      card.append(make("div", "process-empty", "该进程没有已收集账户"));
+      content.append(make("div", "process-empty", "该进程没有已收集账户"));
     }
     body.append(card);
   }
 
   if (view.collected.length) {
-    body.append(sectionTitle(`已收集大户（${view.collected.length}）`));
+    const section = make("div", "autohunt-section");
+    const sectionHead = sectionTitle(`已收集大户（${view.collected.length}）`);
+    const content = make("div", "autohunt-collapse-body");
+    bindAutohuntCollapse(sectionHead, "autohunt:collected", content);
+    section.append(sectionHead, content);
     const rows = view.collected.map((account) => {
       const action = cell("", "table-action");
       action.append(autohuntPnlTrigger(account.address, account.alias));
       return [
-        cell(account.alias || "-"),
+        aliasCell(account.alias),
         addressCell(account.address),
         cell(formatAmount(account.account_value)),
         cell(formatAmount(account.volume)),
@@ -2182,7 +2376,8 @@ function renderAutohunt(data, body) {
         action,
       ];
     });
-    body.append(table(["别名", "地址", "账户价值", "成交量", "盈利", "ROI", "胜率", "评分", "走势"], rows));
+    content.append(table(["别名", "地址", "账户价值", "成交量", "盈利", "ROI", "胜率", "评分", "走势"], rows));
+    body.append(section);
   } else if (query) {
     const empty = make("div", "state-empty");
     empty.append(make("span", "", "没有匹配的收集大户。当前搜索词可能仍在过滤本地列表。 "));
@@ -2214,7 +2409,6 @@ function renderAutohunt(data, body) {
     setTimeout(() => loadAutohuntPositions(), 0);
   }
 }
-
 async function loadAutohuntPositions() {
   const token = ++state.autohuntPositionsToken;
   try {
@@ -2514,6 +2708,7 @@ function candidateButton(candidate) {
   node.type = "button";
   node.title = `点击使用 ${candidate.address}`;
   const head = make("div", "onchain-candidate-head");
+  head.append(coinIcon(candidate.symbol || candidate.token || "?"));
   head.append(make("span", "onchain-candidate-symbol", candidate.symbol || "?"));
   head.append(make("span", "onchain-candidate-chain", candidate.chain || ""));
   node.append(head);
@@ -2536,7 +2731,9 @@ function renderWhaleScan(scan, body) {
   const report = scan.report || {};
   const card = make("div", "onchain-card");
   const head = make("div", "onchain-head");
-  head.append(make("div", "onchain-title", `${report.symbol || scan.token} · ${scan.chain}`));
+  const onchainTitle = make("div", "onchain-title");
+  onchainTitle.append(coinIcon(report.symbol || scan.token), make("span", "", `${report.symbol || scan.token} · ${scan.chain}`));
+  head.append(onchainTitle);
   head.append(make("div", "onchain-score", `评分 ${Math.round(Number(report.score) || 0)}/100`));
   card.append(head);
 
@@ -2872,7 +3069,7 @@ function renderWhaleTransactions(info, body) {
         action.append(link);
         return [
           cell(timeText(row.time)),
-          cell(row.asset || row.token || "—"),
+          coinCell(row.asset || row.token || "—"),
           cell(TX_DIRECTION_LABELS[row.direction] || "交易", row.direction === "in" ? "positive" : row.direction === "out" ? "negative" : ""),
           cell(qty.format(Number(row.value) || 0)),
           addressCell(row.counterparty || "—"),
@@ -2921,7 +3118,7 @@ function renderWhaleTokens(info, body) {
   const rows = info.tokens.map((row) => {
     const action = make("td");
     const actions = make("div", "row-actions");
-    const nameCell = cell(row.symbol || row.token);
+    const nameCell = coinCell(row.symbol || row.token);
     appendChatSourceBadge(nameCell, row);
     actions.append(rowActionButton("复扫", "", (event) => {
       event.stopPropagation();
@@ -3280,7 +3477,7 @@ function renderWtaDaily(series, asset) {
   const legend = make("div", "onchain-hint");
   legend.append(make("span", "wta-legend-dot in", ""), make("span", "", "转入"));
   legend.append(make("span", "wta-legend-dot out", ""), make("span", "", "转出"));
-  legend.append(make("span", "onchain-note", ` · ${asset}`));
+  legend.append(coinLabel(asset, asset));
   card.append(legend);
   return card;
 }
@@ -3393,6 +3590,7 @@ async function loadWtaAssets() {
     const values = [...select.children].map((node) => node.value);
     state.wtaAsset = values.includes(wanted) ? wanted : (values[0] || "");
     select.value = state.wtaAsset;
+    coinSelectIcon(select, state.wtaAsset);
   } catch (error) {
     showState("whale-tx", "error", apiErrorText(error));
   }
