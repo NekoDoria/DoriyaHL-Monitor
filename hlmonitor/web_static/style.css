@@ -432,10 +432,17 @@ button:focus-visible, input:focus-visible { outline: 2px solid var(--accent); ou
   padding: 15px; border: 1px solid var(--border); border-radius: 11px;
   background: var(--panel); margin-bottom: 12px;
 }
-.process-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+.process-head {
+  display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
+}
+.process-collapse-head { cursor: pointer; user-select: none; }
+.process-collapse-head:hover { opacity: .92; }
+.process-caret { margin-left: auto; font-size: 14px; line-height: 1; }
+.process-caret.collapsed { transform: rotate(-90deg); }
+.process-collapse-content[hidden] { display: none !important; }
 .process-title { display: flex; align-items: center; gap: 8px; min-width: 0; }
 .process-name { font-size: 16px; font-weight: 680; }
-.process-scope { color: var(--muted); font-size: 12px; white-space: nowrap; }
+.process-scope { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; margin: 10px 0 2px; color: var(--muted); font-size: 12px; }
 .process-status { padding: 3px 8px; border-radius: 999px; font-size: 11px; font-weight: 650; }
 .process-status.on { color: #8df0cd; background: rgba(56,209,167,.14); }
 .process-status.off { color: #b9b9b9; background: rgba(160,160,160,.14); }
@@ -455,6 +462,62 @@ button:focus-visible, input:focus-visible { outline: 2px solid var(--accent); ou
 .autohunt-collapse-head:hover { opacity: .92; }
 .autohunt-collapse-head .onchain-caret { margin-right: 7px; }
 .autohunt-collapse-body.collapsed { display: none; }
+.process-categories {
+  display: grid; gap: 8px; margin-top: 10px; min-width: 0;
+}
+.process-category {
+  border: 1px solid var(--border); border-radius: 8px;
+  background: rgba(255,255,255,.02);
+}
+.process-category-head {
+  display: flex; align-items: center; justify-content: space-between;
+  width: 100%; min-height: 34px; height: 34px;
+  gap: 8px; padding: 0 8px; border-bottom: 1px solid var(--border);
+  background: rgba(255,255,255,.03);
+}
+.process-category-head .onchain-caret { flex: 0 0 auto; }
+.category-tag {
+  flex: 0 0 auto; display: inline-flex; align-items: center;
+  height: 20px; padding: 0 8px; border-radius: 999px;
+  font-size: 11px; font-weight: 700; line-height: 1; white-space: nowrap;
+}
+.process-category-count { color: var(--muted); font-size: 12px; white-space: nowrap; }
+.position-categories {
+  display: grid; gap: 10px; margin-top: 8px;
+}
+.position-category {
+  border: 1px solid var(--border); border-radius: 9px;
+  background: rgba(255,255,255,.02);
+}
+.position-category-head {
+  display: flex; align-items: center; gap: 8px;
+  min-height: 34px; padding: 0 10px; cursor: pointer; user-select: none;
+  border-bottom: 1px solid var(--border);
+  background: rgba(255,255,255,.03);
+}
+.position-category-head:hover { opacity: .92; }
+.position-category-caret { font-size: 12px; line-height: 1; }
+.position-category-caret.collapsed { transform: rotate(-90deg); }
+.position-category-count { color: var(--muted); font-size: 12px; white-space: nowrap; }
+.position-category-body { padding: 0 0 2px; }
+.position-category-body[hidden] { display: none !important; }.process-category-coins {
+  display: flex; flex-wrap: wrap; gap: 6px; padding: 2px 0 0; min-width: 0;
+}
+.process-category-coins .coin-label {
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 3px 8px; border: 1px solid var(--border); border-radius: 7px;
+  background: var(--panel-2); font-size: 12px;
+}
+.coin-label.cat-main { border-left: 3px solid rgba(56,209,167,.85); }
+.coin-label.cat-secondary { border-left: 3px solid rgba(110,170,255,.85); }
+.coin-label.cat-alt { border-left: 3px solid rgba(190,140,255,.85); }
+.coin-label.cat-stock { border-left: 3px solid rgba(255,184,107,.85); }
+.coin-label.cat-metal { border-left: 3px solid rgba(233,197,93,.85); }
+.category-tag.main { color: #8df0cd; background: rgba(56,209,167,.14); }
+.category-tag.secondary { color: #a8d3ff; background: rgba(110,170,255,.14); }
+.category-tag.alt { color: #d9bfff; background: rgba(190,140,255,.14); }
+.category-tag.stock { color: #ffc79a; background: rgba(255,184,107,.14); }
+.category-tag.metal { color: #f6e3a3; background: rgba(233,197,93,.14); }
 
 .whale-zone.long { background: rgba(110,170,255,.13); border: 1px dashed rgba(110,170,255,.62); }
 .whale-zone.short { background: rgba(190,140,255,.13); border: 1px dashed rgba(190,140,255,.62); }

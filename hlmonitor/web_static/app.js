@@ -205,7 +205,9 @@ function coinCell(coin, className = "") {
 }
 
 function coinLabel(coin, text) {
-  const node = make("span", "coin-label");
+  const category = coinCategory(coin);
+  const node = make("span", `coin-label cat-${category}`);
+  node.title = `${coin || "-"} · ${COIN_CATEGORY_LABELS[category]}`;
   node.append(coinIcon(coin), make("span", "", text || coin || "-"));
   return node;
 }
@@ -1510,7 +1512,10 @@ function bindAutohuntCollapse(head, key, content) {
   const apply = () => {
     const nowCollapsed = autohuntCollapsed(key);
     if (content) content.classList.toggle("autohunt-collapse-body", true);
-    if (content) content.classList.toggle("collapsed", nowCollapsed);
+    if (content) {
+      content.classList.toggle("collapsed", nowCollapsed);
+      content.style.display = nowCollapsed ? "none" : "";
+    }
     head.setAttribute("aria-expanded", String(!nowCollapsed));
     caret.classList.toggle("collapsed", nowCollapsed);
   };
@@ -1524,8 +1529,8 @@ function bindAutohuntCollapse(head, key, content) {
 function aliasCell(value) {
   const node = cell(value || "-");
   node.title = value
-    ? "别名：地址的显示名称；Autohunt 结果通常使用 Hyperliquid 排行榜昵称。"
-    : "别名是地址的显示名称；Autohunt 结果通常使用 Hyperliquid 排行榜昵称，手动订阅地址可在 Telegram 里命名。";
+    ? "账户名：地址的显示名称；Autohunt 结果通常使用 Hyperliquid 排行榜昵称。"
+    : "账户名是地址的显示名称；Autohunt 结果通常使用 Hyperliquid 排行榜昵称，手动订阅地址可在 Telegram 里命名。";
   return node;
 }
 
@@ -2242,6 +2247,121 @@ function parseAutohuntCoins(query) {
   return coinLike ? values.map((value) => value.toUpperCase()) : [];
 }
 
+const MAIN_COIN_SET = new Set([
+  "BTC", "ETH", "SOL", "BNB", "XRP", "DOGE", "ADA", "AVAX", "LINK", "LTC",
+  "BCH", "DOT", "TON", "UNI", "SUI", "HYPE", "TRX", "NEAR", "APT", "ARB",
+  "OP", "INJ", "RENDER", "TAO", "TIA", "ONDO", "JUP", "SEI", "WLD", "AAVE",
+]);
+const SECONDARY_COIN_SET = new Set([
+  "ATOM", "FIL", "ICP", "HBAR", "VET", "XLM", "ALGO", "FLOW", "EGLD", "THETA",
+  "SAND", "MANA", "GALA", "APE", "AXS", "CHZ", "ENJ", "LDO", "CRV", "GRT",
+  "SNX", "COMP", "MKR", "ENS", "SUSHI", "YFI", "BAL", "1INCH", "LRC", "WOO",
+  "FTM", "STX", "IMX", "ARKM", "FET", "AGIX", "AR", "CFX", "MINA", "KAVA",
+  "ZIL", "ONE", "IOTA", "QTUM", "ZEC", "DASH", "WAVES", "BAT", "CELO", "KSM",
+]);
+const STOCK_COIN_SET = new Set([
+  "AAPL", "TSLA", "NVDA", "META", "AMZN", "MSFT", "GOOGL", "GOOG", "NFLX",
+  "AMD", "INTC", "COIN", "MSTR", "SPY", "QQQ", "PLTR", "AVGO", "ORCL", "CRM",
+  "UBER", "SHOP", "PYPL", "ABNB", "TSM", "BABA", "DIS", "NKE", "JPM", "V",
+  "MA", "XOM", "WMT", "PG", "KO", "PEP", "MCD", "HD", "CSCO", "QCOM", "TXN",
+  "IBM", "ADBE", "SNOW", "CRWD", "PANW", "BAC", "COST", "LLY", "ASML", "ARM",
+  "SNDK", "CRCL", "SKHX", "RIVN", "CRWV", "GME", "HIMS", "DKNG", "LITE",
+  "MRVL", "RKLB", "BIRD", "ZM", "EBAY", "NOW", "NBIS", "WDC", "NOK", "STRC",
+  "AMAT", "IBIDEN", "GEV", "IREN", "NET", "RDDT", "AAOI", "MRNA", "SHEIN",
+  "KIOXIA", "SOFTBANK", "HYUNDAI", "SMSN", "BX", "DELL", "UNITREE", "CXMT",
+  "YMTC", "SKHY", "GIGADEV", "SHAZ", "LYTE", "RTX", "XIAOMI", "TENCENT",
+  "KWEB", "CAMBRICON", "NAVER", "SMCI", "MELI", "SOFI", "TTWO", "COHR", "GLW",
+  "CRDO", "LRCX", "STX", "VST", "TER", "CIEN", "IONQ", "GPRO", "IGV",
+  "GLDMINE", "SMH", "SOXL", "MAGS", "XBI", "XLE", "URNM", "KORU", "KSTR",
+  "EWY", "EWJ", "EWZ", "EWT", "SPACEX", "OPENAI", "ANTHROPIC", "OAI", "ANTH",
+  "BB", "INNOLIGHT",
+]);
+const METAL_COIN_SET = new Set([
+  "GOLD", "SILVER", "PLATINUM", "PALLADIUM", "XAU", "XAG", "PAXG", "XAUT",
+]);
+const COIN_CATEGORY_ORDER = ["main", "secondary", "alt", "stock", "metal"];
+const COIN_CATEGORY_LABELS = {
+  main: "主流",
+  secondary: "次主流",
+  alt: "山寨",
+  stock: "股票",
+  metal: "贵金属",
+};
+
+function coinCategorySymbol(coin) {
+  const text = String(coin || "").trim().toUpperCase();
+  const withoutDex = text.includes(":") ? text.slice(text.lastIndexOf(":") + 1) : text;
+  return withoutDex.split("/")[0].replace(/^@/, "");
+}
+
+function coinCategory(coin) {
+  const symbol = coinCategorySymbol(coin);
+  if (METAL_COIN_SET.has(symbol)) return "metal";
+  if (STOCK_COIN_SET.has(symbol)) return "stock";
+  if (MAIN_COIN_SET.has(symbol)) return "main";
+  if (SECONDARY_COIN_SET.has(symbol)) return "secondary";
+  return "alt";
+}
+
+function coinCategoryGroups(coins) {
+  const groups = new Map(COIN_CATEGORY_ORDER.map((id) => [id, { id, label: COIN_CATEGORY_LABELS[id], coins: [] }]));
+  for (const coin of coins || []) {
+    const id = coinCategory(coin);
+    groups.get(id).coins.push(coin);
+  }
+  return COIN_CATEGORY_ORDER.map((id) => groups.get(id)).filter((group) => group.coins.length);
+}
+
+function renderPositionCategories(positions) {
+  if (!positions?.length) return null;
+  const groups = new Map(COIN_CATEGORY_ORDER.map((id) => [id, { id, label: COIN_CATEGORY_LABELS[id], positions: [] }]));
+  for (const position of positions) {
+    groups.get(coinCategory(position.coin)).positions.push(position);
+  }
+  const ordered = COIN_CATEGORY_ORDER.map((id) => groups.get(id)).filter((group) => group.positions.length);
+  if (!ordered.length) return null;
+  const wrap = make("div", "position-categories");
+  for (const group of ordered) {
+    const item = make("div", "position-category");
+    const head = make("div", "position-category-head");
+    const caret = make("span", "position-category-caret", "▾");
+    head.append(
+      caret,
+      make("span", `category-tag ${group.id}`, group.label),
+      make("span", "position-category-count", `${group.positions.length} 个`),
+    );
+    const body = make("div", "position-category-body");
+    const rows = group.positions.map((position) => [
+      coinCell(position.coin),
+      sideCell(position.side),
+      cell(qty.format(Math.abs(Number(position.szi) || 0))),
+      cell(priceText(position.entry)),
+      cell(formatAmount(position.notional)),
+      cell(signed(position.pnl), pnlClass(position.pnl)),
+      cell(position.account_count ? String(position.account_count) : "-"),
+    ]);
+    body.append(table(["币种", "方向", "数量", "加权均价", "仓位价值", "浮动盈亏", "账户数"], rows));
+    const setCollapsed = (collapsed) => {
+      body.hidden = collapsed;
+      caret.classList.toggle("collapsed", collapsed);
+      head.setAttribute("aria-expanded", String(!collapsed));
+    };
+    const toggleCollapsed = () => setCollapsed(!body.hidden);
+    head.setAttribute("role", "button");
+    head.setAttribute("tabindex", "0");
+    head.setAttribute("aria-expanded", "true");
+    head.addEventListener("click", toggleCollapsed);
+    head.addEventListener("keydown", (event) => {
+      if (event.key !== "Enter" && event.key !== " ") return;
+      event.preventDefault();
+      toggleCollapsed();
+    });
+    item.append(head, body);
+    wrap.append(item);
+  }
+  return wrap;
+}
+
 function renderAutohunt(data, body) {
   state.autohuntData = data;
   destroyAutohuntPnlChart();
@@ -2278,21 +2398,38 @@ function renderAutohunt(data, body) {
 
   for (const row of view.processes) {
     const card = make("div", "process-card");
-    const head = make("div", "process-head");
+    const head = make("div", "process-head process-collapse-head");
     const title = make("div", "process-title");
     title.append(make("span", "process-name", row.name));
     title.append(make("span", `process-status ${row.running ? "running" : row.enabled ? "on" : "off"}`, processStatusText(row)));
     head.append(title);
+    const caret = make("span", "process-caret", "▾");
+    head.append(caret);
+    const content = make("div", "process-collapse-content");
+    const setCollapsed = (collapsed) => {
+      content.hidden = collapsed;
+      caret.classList.toggle("collapsed", collapsed);
+      head.setAttribute("aria-expanded", String(!collapsed));
+    };
+    const toggleCollapsed = () => setCollapsed(!content.hidden);
+    head.setAttribute("role", "button");
+    head.setAttribute("tabindex", "0");
+    head.setAttribute("aria-expanded", "true");
+    head.addEventListener("click", toggleCollapsed);
+    head.addEventListener("keydown", (event) => {
+      if (event.key !== "Enter" && event.key !== " ") return;
+      event.preventDefault();
+      toggleCollapsed();
+    });
+    card.append(head, content);
+
     const scope = make("div", "process-scope coin-scope");
     if (row.coins.length) {
       row.coins.forEach((coin) => scope.append(coinLabel(coin)));
     } else {
       scope.textContent = "聚合";
     }
-    head.append(scope);
-    const content = make("div", "autohunt-collapse-body");
-    bindAutohuntCollapse(head, `autohunt:process:${row.key}`, content);
-    card.append(head, content);
+    content.append(scope);
 
     const meta = make("div", "process-meta");
     meta.append(
@@ -2306,7 +2443,6 @@ function renderAutohunt(data, body) {
       meta.append(make("span", "", `下次 ${relativeTime(row.next_run)}`));
     }
     content.append(meta);
-
     if (row.running) {
       const total = Math.max(row.progress_total, 1);
       const done = Math.min(Math.max(row.progress_done, 0), total);
@@ -2319,25 +2455,25 @@ function renderAutohunt(data, body) {
     }
 
     const positions = row.positions || [];
-    const positionTitle = pendingPositions ? "聚合持仓（加载中）" : positions.length ? "聚合持仓（同向、相近价格）" : "聚合持仓（当前无持仓）";
+    const positionTitle = pendingPositions ? "聚合持仓（加载中）" : positions.length ? "聚合持仓（按币种分类）" : "聚合持仓（当前无持仓）";
     content.append(make("div", "process-section-title", positionTitle));
-    if (positions.length) {
-      const positionRows = positions.map((position) => [
-        coinCell(position.coin),
-        sideCell(position.side),
-        cell(qty.format(Math.abs(Number(position.szi) || 0))),
-        cell(priceText(position.entry)),
-        cell(formatAmount(position.notional)),
-        cell(signed(position.pnl), pnlClass(position.pnl)),
-        cell(position.account_count ? String(position.account_count) : "-"),
-      ]);
-      content.append(table(["币种", "方向", "数量", "加权均价", "仓位价值", "浮动盈亏", "账户数"], positionRows));
+    const positionCategories = renderPositionCategories(positions);
+    if (positionCategories) {
+      content.append(positionCategories);
     } else {
       content.append(make("div", "process-empty", pendingPositions ? "正在读取这些账户的当前持仓..." : state.autohuntPositionsStatus === "error" ? "持仓读取失败，但账户列表已正常显示。" : "这些记录账户当前未平仓头寸。"));
     }
 
     if (row.accounts.length) {
-      const rows = row.accounts.map((account) => {
+      const accountsHead = sectionTitle(`已收集账户（${row.accounts.length}）`);
+      const accountsContent = make("div", "autohunt-collapse-body");
+      bindAutohuntCollapse(accountsHead, `autohunt:process:${row.key}:accounts`, accountsContent);
+      content.append(accountsHead, accountsContent);
+
+      const sortedAccounts = [...row.accounts].sort(
+        (a, b) => (Number(b.account_value) || 0) - (Number(a.account_value) || 0),
+      );
+      const rows = sortedAccounts.map((account) => {
         const action = cell("", "table-action");
         action.append(autohuntPnlTrigger(account.address, account.alias));
         return [
@@ -2348,7 +2484,7 @@ function renderAutohunt(data, body) {
           action,
         ];
       });
-      content.append(table(["别名", "地址", "账户价值", "记录时间", "走势"], rows));
+      accountsContent.append(table(["账户名", "地址", "账户价值", "记录时间", "走势"], rows));
     } else {
       content.append(make("div", "process-empty", "该进程没有已收集账户"));
     }
@@ -2361,7 +2497,10 @@ function renderAutohunt(data, body) {
     const content = make("div", "autohunt-collapse-body");
     bindAutohuntCollapse(sectionHead, "autohunt:collected", content);
     section.append(sectionHead, content);
-    const rows = view.collected.map((account) => {
+    const sortedCollected = [...view.collected].sort(
+      (a, b) => (Number(b.account_value) || 0) - (Number(a.account_value) || 0),
+    );
+    const rows = sortedCollected.map((account) => {
       const action = cell("", "table-action");
       action.append(autohuntPnlTrigger(account.address, account.alias));
       return [
@@ -2376,7 +2515,7 @@ function renderAutohunt(data, body) {
         action,
       ];
     });
-    content.append(table(["别名", "地址", "账户价值", "成交量", "盈利", "ROI", "胜率", "评分", "走势"], rows));
+    content.append(table(["账户名", "地址", "账户价值", "成交量", "盈利", "ROI", "胜率", "评分", "走势"], rows));
     body.append(section);
   } else if (query) {
     const empty = make("div", "state-empty");
